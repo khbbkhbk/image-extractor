@@ -1,0 +1,114 @@
+:root {
+  --bg: #0b1120;
+  --panel: #111827;
+  --panel-2: #172033;
+  --text: #e5edf6;
+  --muted: #8ea0b5;
+  --line: #2d3a4b;
+  --accent: #2dd4bf;
+  --danger: #fb7185;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  color: var(--text);
+  background:
+    linear-gradient(120deg, rgba(45, 212, 191, 0.16), transparent 34rem),
+    var(--bg);
+  font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.shell {
+  width: min(980px, calc(100vw - 32px));
+  margin: 32px auto;
+}
+
+header,
+.card,
+.grid,
+.actions {
+  margin-bottom: 16px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(17, 24, 39, 0.86);
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+p,
+.hint,
+#status {
+  color: var(--muted);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.row,
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  font-weight: 700;
+}
+
+.check,
+.import {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+input,
+select,
+button,
+.import {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  background: var(--panel-2);
+  padding: 9px 11px;
+  font: inherit;
+}
+
+input.wide {
+  width: 100%;
+}
+
+button,
+.import {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+button.primary {
+  border: 0;
+  color: #04111a;
+  background: linear-gradient(135deg, var(--accent), #38bdf8);
+}
+
+button.danger {
+  border-color: rgba(251, 113, 133, 0.5);
+}
+
+.import input {
+  display: none;
+}

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Comic Image Extractor</title>
+    <link rel="stylesheet" href="./popup.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Comic Image Extractor</h1>
+        <p id="pageContext">等待扫描当前页面</p>
+      </div>
+      <div class="header-actions">
+        <button id="toggleDisplayMode" class="ghost">侧边栏</button>
+        <button id="openOptions" class="ghost">设置</button>
+      </div>
+    </header>
+
+    <section class="toolbar">
+      <button id="scanBtn">扫描图片</button>
+      <button id="scrollBtn" class="secondary">滚动加载</button>
+      <button id="downloadBtn" class="primary">下载选中</button>
+    </section>
+
+    <details class="panel" open>
+      <summary>筛选与排序</summary>
+      <div class="filters">
+        <input id="searchInput" type="search" placeholder="搜索 URL / 文件名">
+        <input id="includeInput" type="text" placeholder="包含关键词，逗号分隔">
+        <input id="excludeInput" type="text" placeholder="排除关键词，逗号分隔">
+        <input id="domainInput" type="text" placeholder="域名过滤">
+        <select id="layoutSelect">
+          <option value="grid">网格</option>
+          <option value="list">列表</option>
+          <option value="masonry">瀑布流</option>
+        </select>
+        <select id="sizeSelect">
+          <option value="small">小</option>
+          <option value="medium">中</option>
+          <option value="large">大</option>
+          <option value="xlarge">超大</option>
+        </select>
+        <select id="sortSelect">
+          <option value="pageIndex">页序</option>
+          <option value="resolution">分辨率</option>
+          <option value="width">宽度</option>
+          <option value="height">高度</option>
+          <option value="url">URL</option>
+        </select>
+      </div>
+    </details>
+
+    <section class="status">
+      <span id="countLabel">0 images</span>
+      <span id="selectionLabel">0/0 selected</span>
+      <button id="selectAllBtn" class="link">全选</button>
+      <button id="clearBtn" class="link">清空</button>
+      <button id="retry429Btn" class="link danger-link" hidden>重下 429</button>
+      <button id="stopRetryBtn" class="link danger-link" hidden>停止重试</button>
+    </section>
+
+    <main id="preview" class="preview grid medium"></main>
+    <footer id="message" role="status"></footer>
+
+    <script type="module" src="./popup.js"></script>
+  </body>
+</html>

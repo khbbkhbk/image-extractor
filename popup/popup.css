@@ -1,0 +1,263 @@
+:root {
+  --bg: #0d1117;
+  --panel: #151b23;
+  --panel-2: #1f2937;
+  --text: #e5edf6;
+  --muted: #8ea0b5;
+  --line: #2d3a4b;
+  --accent: #2dd4bf;
+  --accent-2: #f59e0b;
+  --danger: #fb7185;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  width: min(760px, 100vw);
+  min-height: 560px;
+  margin: 0;
+  color: var(--text);
+  background:
+    radial-gradient(circle at top left, rgba(45, 212, 191, 0.18), transparent 32rem),
+    linear-gradient(135deg, #0d1117 0%, #111827 55%, #0f172a 100%);
+  font: 13px/1.45 "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.header-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.topbar,
+.toolbar,
+.status,
+.panel {
+  margin: 12px;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(21, 27, 35, 0.88);
+}
+
+h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+button,
+select,
+input {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  background: var(--panel-2);
+  padding: 8px 10px;
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+button.primary {
+  background: linear-gradient(135deg, var(--accent), #38bdf8);
+  color: #04111a;
+  border: 0;
+}
+
+button.secondary {
+  border-color: rgba(245, 158, 11, 0.5);
+}
+
+button.ghost,
+button.link {
+  background: transparent;
+}
+
+button.link {
+  padding: 0;
+  border: 0;
+  color: var(--accent);
+}
+
+button.danger-link {
+  color: var(--danger);
+}
+
+.toolbar {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(21, 27, 35, 0.8);
+  overflow: hidden;
+}
+
+.panel summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.filters {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+}
+
+.preview {
+  padding: 0 12px 12px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.preview.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.preview.list {
+  display: grid;
+  gap: 8px;
+}
+
+.preview.masonry {
+  columns: 3 150px;
+  column-gap: 10px;
+}
+
+.image-card {
+  position: relative;
+  break-inside: avoid;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.72);
+  overflow: hidden;
+}
+
+.preview.list .image-card {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+}
+
+.image-card img {
+  width: 100%;
+  height: 140px;
+  object-fit: contain;
+  background: #05070a;
+}
+
+.preview.small .image-card img {
+  height: 96px;
+}
+
+.preview.large .image-card img {
+  height: 190px;
+}
+
+.preview.xlarge .image-card img {
+  height: 260px;
+}
+
+.check {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.meta {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+}
+
+.meta strong,
+.meta small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta span,
+.meta small,
+footer {
+  color: var(--muted);
+}
+
+footer {
+  min-height: 28px;
+  padding: 0 12px 12px;
+}
+
+@media (max-width: 640px) {
+  body {
+    width: 100vw;
+  }
+
+  .filters,
+  .toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar {
+    display: grid;
+  }
+
+  .header-actions {
+    width: 100%;
+  }
+
+  .header-actions button {
+    flex: 1;
+  }
+
+  .preview {
+    max-height: calc(100vh - 330px);
+  }
+}
+
+body[data-display-mode="sidePanel"] {
+  width: 100vw;
+  min-height: 100vh;
+}
+
+body[data-display-mode="sidePanel"] .filters,
+body[data-display-mode="sidePanel"] .toolbar {
+  grid-template-columns: 1fr;
+}
+
+body[data-display-mode="sidePanel"] .preview {
+  max-height: calc(100vh - 340px);
+}

@@ -1,0 +1,60 @@
+{
+  "manifest_version": 3,
+  "name": "Comic Image Extractor",
+  "description": "漫画网站优先、通用网页兼容的图片提取与下载扩展。",
+  "version": "1.0.0",
+  "minimum_chrome_version": "114",
+  "action": {
+    "default_title": "Comic Image Extractor"
+  },
+  "options_page": "options/options.html",
+  "permissions": [
+    "activeTab",
+    "cookies",
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess",
+    "downloads",
+    "sidePanel",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "popup/popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content/content-entry.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "content/*.js",
+        "content/adapters/*.js",
+        "core/*.js",
+        "preview/*.js",
+        "storage/*.js",
+        "utils/*.js",
+        "download/*.js",
+        "vendor/*.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
+}

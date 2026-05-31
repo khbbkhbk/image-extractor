@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Comic Image Extractor 设置</title>
+    <link rel="stylesheet" href="./options.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <h1>Comic Image Extractor 设置</h1>
+        <p>配置扫描、预览、命名和下载策略。配置保存在浏览器本地 storage。</p>
+      </header>
+
+      <section class="card">
+        <h2>配置模板</h2>
+        <div class="row">
+          <select id="profileSelect">
+            <option value="comic">漫画模式</option>
+            <option value="generic">通用网页模式</option>
+            <option value="ecommerce">电商模式</option>
+            <option value="minimal">极简模式</option>
+          </select>
+          <button id="applyProfileBtn">应用模板</button>
+          <button id="resetBtn" class="danger">重置默认</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>展示模式</h2>
+        <div class="row">
+          <label>扩展打开方式
+            <select id="displayMode">
+              <option value="popup">窗口模式</option>
+              <option value="sidePanel">侧边栏模式</option>
+            </select>
+          </label>
+          <p class="hint">侧边栏模式下，点击扩展图标会在浏览器侧边栏打开同一套预览与下载界面。</p>
+        </div>
+      </section>
+
+      <section class="grid">
+        <label>最小宽度 <input id="minWidth" type="number" min="0"></label>
+        <label>最小高度 <input id="minHeight" type="number" min="0"></label>
+        <label>并发下载 <input id="concurrency" type="number" min="1" max="20"></label>
+        <label>重试次数 <input id="retries" type="number" min="0" max="10"></label>
+        <label>超时 ms <input id="timeoutMs" type="number" min="3000"></label>
+        <label>单图请求间隔 ms <input id="requestIntervalMs" type="number" min="0" max="60000"></label>
+        <label>下载模式
+          <select id="mode">
+            <option value="single">单图</option>
+            <option value="zip">ZIP</option>
+            <option value="auto">自动</option>
+          </select>
+        </label>
+        <label>冲突策略
+          <select id="conflictAction">
+            <option value="uniquify">自动重命名</option>
+            <option value="overwrite">覆盖</option>
+            <option value="prompt">询问</option>
+          </select>
+        </label>
+        <label>输出格式
+          <select id="format">
+            <option value="original">保持原格式</option>
+            <option value="jpg">转 JPG</option>
+            <option value="png">转 PNG</option>
+            <option value="webp">转 WEBP</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="card">
+        <label>命名模板</label>
+        <input id="filenameTemplate" class="wide" type="text">
+        <p class="hint">支持 {comic} {chapter} {index:3} {width} {height} {ext} {site} {date} {time} {hash} {pageTitle}</p>
+      </section>
+
+      <section class="card">
+        <label>自定义懒加载属性</label>
+        <input id="customLazyAttributes" class="wide" type="text" placeholder="data-real-src,data-img">
+        <label class="check"><input id="includeBackground" type="checkbox"> 扫描 CSS 背景图</label>
+        <label class="check"><input id="includeMetadata" type="checkbox"> 下载 metadata.json</label>
+        <label class="check"><input id="singleUseSourceFilename" type="checkbox"> 单图下载使用源文件名</label>
+        <label class="check"><input id="antiHotlinkEnabled" type="checkbox"> 默认启用避防盗链请求头</label>
+      </section>
+
+      <section class="actions">
+        <button id="saveBtn" class="primary">保存</button>
+        <button id="exportBtn">导出 JSON</button>
+        <label class="import">导入 JSON <input id="importInput" type="file" accept="application/json"></label>
+        <span id="status"></span>
+      </section>
+    </main>
+
+    <script type="module" src="./options.js"></script>
+  </body>
+</html>
