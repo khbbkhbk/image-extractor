@@ -16,7 +16,10 @@ const state = {
   previewRunId: 0,
   retryTimer: 0,
   autoRetryStopped: false,
-  isDownloading: false
+  isDownloading: false,
+  activeTabId: 0,
+  activeTabUrl: "",
+  scheduledScan: 0
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -27,6 +30,7 @@ document.addEventListener("DOMContentLoaded", init);
 
 async function init() {
   bindEvents();
+  bindTabEvents();
   await loadConfig();
   await scanImages();
 }
@@ -52,11 +56,44 @@ function bindEvents() {
   }
 }
 
-chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type !== "DOWNLOAD_PROGRESS" || message.sessionId !== state.activeSessionId) return;
-  const { completed, failed, rateLimited, total } = message.payload;
-  setMessage(`下载中：成功 ${completed}/${total}，失败 ${failed}，429 ${rateLimited}`);
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (message?.type === "DOWNLOAD_PROGRESS" && message.sessionId === state.activeSessionId) {
+    const { completed, failed, rateLimited, total } = message.payload;
+    setMessage(`下载中：成功 ${completed}/${total}，失败 ${failed}，429 ${rateLimited}`);
+    return;
+  }
+
+  if (message?.type === "IMAGES_UPDATED" && sender?.tab?.id === state.activeTabId) {
+    applyScanPayload(message.payload, sender.tab).catch((error) => setMessage(error.message));
+  }
 });
+
+function bindTabEvents() {
+  chrome.tabs.onActivated.addListener(({ tabId }) => {
+    scheduleScanForTab(tabId, "已切换标签页，正在重新扫描...");
+  });
+
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (tabId !== state.activeTabId) return;
+    if (changeInfo.status === "complete" || changeInfo.url) {
+      scheduleScanForTab(tabId, "页面已更新，正在重新扫描...", tab);
+    }
+  });
+}
+
+function scheduleScanForTab(tabId, messageText, tabFromEvent = null) {
+  clearTimeout(state.scheduledScan);
+  state.scheduledScan = setTimeout(async () => {
+    const tab = tabFromEvent || await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab?.active || !/^https?:\/\//i.test(tab.url || "")) return;
+    if (state.activeTabId === tab.id && state.activeTabUrl === tab.url && messageText.startsWith("页面已更新")) return;
+    state.activeTabId = tab.id;
+    state.activeTabUrl = tab.url || "";
+    clearPreviewState();
+    setMessage(messageText);
+    await scanImages().catch((error) => setMessage(error.message));
+  }, 350);
+}
 
 async function loadConfig() {
   const response = await chrome.runtime.sendMessage({ type: "GET_CONFIG" });
@@ -93,11 +130,19 @@ async function scanImages({ autoScroll = false } = {}) {
   setMessage(autoScroll ? "正在滚动并扫描页面..." : "正在扫描当前页面...");
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) throw new Error("No active tab");
+  state.activeTabId = tab.id;
+  state.activeTabUrl = tab.url || "";
   await ensureContentScript(tab);
   const type = autoScroll ? "AUTO_SCROLL_SCAN" : "SCAN_IMAGES";
   const payload = await sendTabMessage(tab.id, { type, maxSteps: 12 });
   if (payload?.error) throw new Error(payload.error);
 
+  await applyScanPayload(payload, tab);
+  setMessage(`扫描完成：${state.images.length} 张图片`);
+}
+
+async function applyScanPayload(payload, tab = {}) {
+  if (!payload) return;
   state.context = payload.context || {};
   state.images = (payload.images || []).map((image, index) => ({
     ...image,
@@ -109,8 +154,6 @@ async function scanImages({ autoScroll = false } = {}) {
   $("#pageContext").textContent = `${state.context.comic || state.context.pageTitle || tab.title} · ${state.context.chapter || state.context.site || ""}`;
   await installPreviewAntiHotlinkRules();
   render();
-  hydrateVisiblePreviews();
-  setMessage(`扫描完成：${state.images.length} 张图片`);
 }
 
 function render() {
@@ -212,6 +255,17 @@ async function ensureContentScript(tab) {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function clearPreviewState() {
+  state.previewRunId += 1;
+  state.images = [];
+  state.visibleImages = [];
+  state.selected.clear();
+  preview.replaceChildren();
+  $("#countLabel").textContent = "0 images";
+  $("#selectionLabel").textContent = "0/0 selected";
+  clearPreviewAntiHotlinkRules();
 }
 
 function scheduleAutoRetry429() {
