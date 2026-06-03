@@ -1,0 +1,248 @@
+(async () => {
+  if (window.__CIE_CONTENT_ENTRY_LOADED__) return;
+  window.__CIE_CONTENT_ENTRY_LOADED__ = true;
+
+  const [{ ImageScanner }, { PageObserver }] = await Promise.all([
+    import(chrome.runtime.getURL("content/scanner.js")),
+    import(chrome.runtime.getURL("content/observer.js"))
+  ]);
+
+  const scanner = new ImageScanner(document);
+  let observer = null;
+  let lastPayload = null;
+  let active = true;
+
+  async function runScan(reason = "manual") {
+    if (!active || !isRuntimeAvailable()) return lastPayload;
+    try {
+      lastPayload = await scanner.scan();
+      safeSendMessage({ type: "IMAGES_UPDATED", reason, payload: lastPayload });
+      return lastPayload;
+    } catch (error) {
+      if (isContextInvalidated(error)) {
+        deactivate();
+        return lastPayload;
+      }
+      throw error;
+    }
+  }
+
+  async function autoScroll(maxSteps = 0, direction = "down") {
+    const steps = Number(maxSteps) > 0 ? Number(maxSteps) : 80;
+    let previousSnapshot = getScrollSnapshot(direction);
+
+    for (let step = 0; step < steps; step += 1) {
+      scrollToBoundary(direction);
+      await waitFor(420);
+      const pendingBeforeWait = getPendingEdgeImages(direction).length;
+      await waitForEdgeImages(direction, 9000);
+      await waitForScrollableGrowth(direction, previousSnapshot, 2600);
+
+      const nextSnapshot = getScrollSnapshot(direction);
+      const imageCountIncreased = nextSnapshot.imageCount > previousSnapshot.imageCount;
+      const layoutChanged = !isScrollStable(previousSnapshot, nextSnapshot, direction);
+      const hasPending = pendingBeforeWait > 0;
+      previousSnapshot = nextSnapshot;
+
+      if (!imageCountIncreased && !layoutChanged && !hasPending) break;
+    }
+
+    return runScan("auto-scroll");
+  }
+
+  function startObserve() {
+    if (observer || !active) return;
+    observer = new PageObserver({
+      onChange: () => runScan("observe").catch(console.error),
+      onRouteChange: () => runScan("route").catch(console.error)
+    });
+    observer.start();
+  }
+
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (!message || !message.type) return false;
+    if (message.type === "PING") {
+      sendResponse({ ok: true });
+      return false;
+    }
+    if (message.type === "SCAN_IMAGES") {
+      runScan("manual").then(sendResponse).catch((error) => sendResponse({ error: error.message }));
+      return true;
+    }
+    if (message.type === "GET_LAST_SCAN") {
+      sendResponse(lastPayload);
+      return false;
+    }
+    if (message.type === "START_OBSERVE") {
+      startObserve();
+      sendResponse({ ok: true });
+      return false;
+    }
+    if (message.type === "STOP_OBSERVE") {
+      observer?.stop();
+      observer = null;
+      sendResponse({ ok: true });
+      return false;
+    }
+    if (message.type === "AUTO_SCROLL_SCAN") {
+      autoScroll(message.maxSteps, message.direction).then(sendResponse).catch((error) => sendResponse({ error: error.message }));
+      return true;
+    }
+    if (message.type === "FETCH_IMAGE_BLOB") {
+      fetchImageAsDataUrl(message.url).then(sendResponse).catch((error) => sendResponse({
+        ok: false,
+        error: error.message,
+        status: error.status || 0
+      }));
+      return true;
+    }
+    return false;
+  });
+
+  startObserve();
+  runScan("initial").catch(console.error);
+
+  function safeSendMessage(message) {
+    try {
+      chrome.runtime.sendMessage(message).catch((error) => {
+        if (isContextInvalidated(error)) deactivate();
+      });
+    } catch (error) {
+      if (isContextInvalidated(error)) deactivate();
+      else throw error;
+    }
+  }
+
+  function deactivate() {
+    active = false;
+    observer?.stop();
+    observer = null;
+  }
+
+  function isRuntimeAvailable() {
+    try {
+      return Boolean(chrome?.runtime?.id);
+    } catch {
+      return false;
+    }
+  }
+
+  function isContextInvalidated(error) {
+    return String(error?.message || error).includes("Extension context invalidated");
+  }
+
+  async function fetchImageAsDataUrl(url) {
+    const response = await fetch(url, {
+      credentials: "include",
+      cache: "force-cache",
+      mode: "cors"
+    });
+    if (!response.ok) {
+      const error = new Error(`Page fetch failed: HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    const blob = await response.blob();
+    return {
+      ok: true,
+      dataUrl: await blobToDataUrl(blob),
+      type: blob.type,
+      size: blob.size
+    };
+  }
+
+  async function blobToDataUrl(blob) {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let index = 0; index < bytes.length; index += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+    }
+    return `data:${blob.type || "application/octet-stream"};base64,${btoa(binary)}`;
+  }
+
+  function scrollToBoundary(direction) {
+    const root = document.scrollingElement || document.documentElement;
+    const targets = {
+      down: { top: root.scrollHeight, left: root.scrollLeft },
+      up: { top: 0, left: root.scrollLeft },
+      right: { top: root.scrollTop, left: root.scrollWidth },
+      left: { top: root.scrollTop, left: 0 }
+    };
+    window.scrollTo({ ...(targets[direction] || targets.down), behavior: "smooth" });
+  }
+
+  function getScrollSnapshot(direction) {
+    const root = document.scrollingElement || document.documentElement;
+    return {
+      top: Math.round(root.scrollTop || window.scrollY || 0),
+      left: Math.round(root.scrollLeft || window.scrollX || 0),
+      scrollHeight: Math.round(root.scrollHeight || 0),
+      scrollWidth: Math.round(root.scrollWidth || 0),
+      imageCount: document.images.length,
+      axis: direction === "left" || direction === "right" ? Math.round(root.scrollLeft || window.scrollX || 0) : Math.round(root.scrollTop || window.scrollY || 0)
+    };
+  }
+
+  function isScrollStable(previousSnapshot, nextSnapshot, direction) {
+    if (!previousSnapshot) return false;
+    const axisChanged = previousSnapshot.axis !== nextSnapshot.axis;
+    const heightChanged = previousSnapshot.scrollHeight !== nextSnapshot.scrollHeight;
+    const widthChanged = previousSnapshot.scrollWidth !== nextSnapshot.scrollWidth;
+    const imageCountChanged = previousSnapshot.imageCount !== nextSnapshot.imageCount;
+    const horizontal = direction === "left" || direction === "right";
+    return !axisChanged && !imageCountChanged && !(horizontal ? widthChanged : heightChanged);
+  }
+
+  async function waitForEdgeImages(direction, timeoutMs = 5000) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const pending = getPendingEdgeImages(direction);
+      if (!pending.length) return;
+      await Promise.race([
+        Promise.allSettled(pending.map((image) => waitForImage(image))),
+        waitFor(600)
+      ]);
+      await waitFor(120);
+    }
+  }
+
+  function getPendingEdgeImages(direction) {
+    const threshold = 240;
+    return [...document.images].filter((image) => {
+      if (!image || image.complete || !image.currentSrc) return false;
+      const rect = image.getBoundingClientRect();
+      if (!rect.width || !rect.height) return false;
+      if (direction === "up") return rect.top <= threshold && rect.bottom >= -threshold;
+      if (direction === "left") return rect.left <= threshold && rect.right >= -threshold;
+      if (direction === "right") return rect.right >= window.innerWidth - threshold && rect.left <= window.innerWidth + threshold;
+      return rect.bottom >= window.innerHeight - threshold && rect.top <= window.innerHeight + threshold;
+    });
+  }
+
+  function waitForImage(image) {
+    if (!image || image.complete) return Promise.resolve();
+    return new Promise((resolve) => {
+      const cleanup = () => {
+        image.removeEventListener("load", cleanup);
+        image.removeEventListener("error", cleanup);
+        resolve();
+      };
+      image.addEventListener("load", cleanup, { once: true });
+      image.addEventListener("error", cleanup, { once: true });
+    });
+  }
+
+  async function waitForScrollableGrowth(direction, previousSnapshot, timeoutMs = 1600) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const current = getScrollSnapshot(direction);
+      if (!isScrollStable(previousSnapshot, current, direction)) return;
+      await waitFor(180);
+    }
+  }
+
+  function waitFor(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+})();

@@ -4,6 +4,7 @@ export class PageObserver {
   constructor({ onChange, onRouteChange } = {}) {
     this.onChange = debounce(onChange || (() => {}), 500);
     this.onRouteChange = debounce(onRouteChange || (() => {}), 300);
+    this.onScrollChange = debounce(() => (onChange || (() => {}))({ reason: "scroll" }), 850);
     this.observer = null;
     this.lastUrl = location.href;
   }
@@ -23,14 +24,14 @@ export class PageObserver {
     });
     this.patchHistory();
     window.addEventListener("popstate", this.handleRouteChange, true);
-    window.addEventListener("scroll", this.onChange, { passive: true });
+    window.addEventListener("scroll", this.onScrollChange, { passive: true });
   }
 
   stop() {
     this.observer?.disconnect();
     this.observer = null;
     window.removeEventListener("popstate", this.handleRouteChange, true);
-    window.removeEventListener("scroll", this.onChange);
+    window.removeEventListener("scroll", this.onScrollChange);
   }
 
   handleRouteChange = () => {

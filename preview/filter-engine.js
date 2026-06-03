@@ -1,5 +1,39 @@
 function list(value = "") {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim().toLowerCase()).filter(Boolean);
   return String(value).split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
+}
+
+function toNumber(value) {
+  const numeric = Number(value || 0);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function applyDedupe(images, mode = "none") {
+  if (mode === "none") return images;
+
+  const groups = new Map();
+  for (const image of images) {
+    const key = image.dedupeKey || image.url || image.hash || image.id;
+    const bucket = groups.get(key) || [];
+    bucket.push(image);
+    groups.set(key, bucket);
+  }
+
+  if (mode === "remove-all") {
+    return images.filter((image) => (groups.get(image.dedupeKey || image.url || image.hash || image.id) || []).length === 1);
+  }
+
+  if (mode === "keep-one") {
+    const kept = new Set();
+    return images.filter((image) => {
+      const key = image.dedupeKey || image.url || image.hash || image.id;
+      if (kept.has(key)) return false;
+      kept.add(key);
+      return true;
+    });
+  }
+
+  return images;
 }
 
 export function filterImages(images, filters = {}) {
@@ -7,21 +41,35 @@ export function filterImages(images, filters = {}) {
   const includes = list(filters.includeKeywords);
   const excludes = list(filters.excludeKeywords);
   const domain = String(filters.domain || "").toLowerCase().trim();
-  const formats = new Set(filters.formats || []);
-  const minKb = Number(filters.minKb || 0);
-  const maxMb = Number(filters.maxMb || 0);
+  const formats = new Set(list(filters.formats));
+  const minKb = toNumber(filters.minKb);
+  const maxMb = toNumber(filters.maxMb);
+  const sizeFilteringEnabled = Boolean(filters.sizeFilteringEnabled);
+  const minWidth = toNumber(filters.minWidth);
+  const minHeight = toNumber(filters.minHeight);
+  const maxWidth = toNumber(filters.maxWidth);
+  const maxHeight = toNumber(filters.maxHeight);
+  const dedupeMode = String(filters.dedupeMode || "none");
 
-  return images.filter((image) => {
+  const filtered = images.filter((image) => {
     const haystack = `${image.url} ${image.filename || ""} ${image.node || ""} ${image.alt || ""}`.toLowerCase();
     if (search && !haystack.includes(search)) return false;
     if (domain && !image.url.toLowerCase().includes(domain)) return false;
     if (includes.length && !includes.some((word) => haystack.includes(word))) return false;
     if (excludes.length && excludes.some((word) => haystack.includes(word))) return false;
     if (formats.size && !formats.has((image.ext || image.format || "").toLowerCase())) return false;
+    if (sizeFilteringEnabled) {
+      if (minWidth > 0 && image.width > 0 && image.width < minWidth) return false;
+      if (minHeight > 0 && image.height > 0 && image.height < minHeight) return false;
+      if (maxWidth > 0 && image.width > 0 && image.width > maxWidth) return false;
+      if (maxHeight > 0 && image.height > 0 && image.height > maxHeight) return false;
+    }
     if (minKb > 0 && image.bytes > 0 && image.bytes < minKb * 1024) return false;
     if (maxMb > 0 && image.bytes > 0 && image.bytes > maxMb * 1024 * 1024) return false;
     return true;
   });
+
+  return applyDedupe(filtered, dedupeMode);
 }
 
 export function sortImages(images, sortBy = "pageIndex") {

@@ -1,5 +1,5 @@
 import { configManager } from "../core/config-manager.js";
-import { createImageModel, dedupeImages } from "../core/image-model.js";
+import { createImageModel } from "../core/image-model.js";
 import { getImageCandidatesFromElement, extractBackgroundUrls, isElementVisible } from "../utils/dom.js";
 import { resolveUrl, isLikelyImageUrl } from "../utils/url.js";
 import { hashString } from "../utils/hash.js";
@@ -37,7 +37,7 @@ export class ImageScanner {
       }
     }
 
-    const filtered = dedupeImages(images)
+    const filtered = images
       .map((image) => ({ ...image, score: this.parser.scoreImage(image, image.elementRef) }))
       .filter((image) => this.matchesConfig(image, config))
       .map(({ elementRef, ...image }) => image);

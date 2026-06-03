@@ -6,9 +6,11 @@ export function createImageModel(input = {}) {
   const width = Number(input.width || 0);
   const height = Number(input.height || 0);
   const ext = (input.ext || getExtensionFromUrl(normalizedUrl)).toLowerCase();
-  const id = input.id || hashString(`${normalizedUrl}:${width}:${height}:${input.source || ""}`);
+  const dedupeKey = input.dedupeKey || hashString(`${normalizedUrl}:${width}:${height}:${input.source || ""}`);
+  const id = input.id || hashString(`${normalizedUrl}:${width}:${height}:${input.source || ""}:${input.order || 0}:${input.node || ""}`);
   return {
     id,
+    dedupeKey,
     url: normalizedUrl,
     originalUrl: input.originalUrl || input.url || "",
     width,

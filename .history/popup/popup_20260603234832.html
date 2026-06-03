@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Comic Image Extractor</title>
+  <link rel="stylesheet" href="./popup.css">
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="topbar-content">
+      <h1>Comic Image Extractor</h1>
+      <p id="pageContext">等待扫描当前页面</p>
+    </div>
+    <div class="header-actions">
+      <button id="toggleDisplayMode" class="icon-btn ghost header-icon-btn" type="button" aria-label="切换侧边栏模式"
+        title="切换侧边栏模式">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M4 5h16v14H4zM6 7v10h4V7zm6 0v10h6V7z"></path>
+        </svg>
+      </button>
+      <button id="openOptions" class="icon-btn ghost header-icon-btn" type="button" aria-label="打开设置" title="打开设置">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path
+            d="M19.14 12.94a7.43 7.43 0 000-1.88l2.03-1.58-1.92-3.32-2.39.96a7.24 7.24 0 00-1.63-.95L14.9 2h-3.8l-.33 2.23c-.58.22-1.13.53-1.63.95l-2.39-.96-1.92 3.32 2.03 1.58a7.43 7.43 0 000 1.88l-2.03 1.58 1.92 3.32 2.39-.96c.5.42 1.05.73 1.63.95l.33 2.23h3.8l.33-2.23c.58-.22 1.13-.53 1.63-.95l2.39.96 1.92-3.32zM12 15.5A3.5 3.5 0 1112 8a3.5 3.5 0 010 7.5z">
+          </path>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <section class="toolbar">
+    <select id="scrollDirectionSelect" class="toolbar-select" aria-label="滚动方向">
+      <option value="down">向下</option>
+      <option value="up">向上</option>
+      <option value="left">向左</option>
+      <option value="right">向右</option>
+    </select>
+    <button id="scrollBtn" class="secondary">滚动加载</button>
+    <button id="scanBtn">扫描图片</button>
+    <button id="downloadBtn" class="primary">下载选中</button>
+  </section>
+
+  <details class="panel" open>
+    <summary>筛选与排序</summary>
+    <div class="filters">
+      <label class="field">
+        <span class="field-heading">搜索 <span class="field-help" tabindex="0"
+            data-tooltip="按图片地址、文件名和替代文本快速查找。">?</span></span>
+        <div class="field-control">
+          <input id="searchInput" type="search" placeholder="搜索 URL / 文件名 / alt">
+        </div>
+      </label>
+      <label class="field">
+        <span class="field-heading">包含关键词 <span class="field-help" tabindex="0"
+            data-tooltip="至少命中一个关键词才会保留该图片。">?</span></span>
+        <div class="field-control">
+          <input id="includeInput" type="text" placeholder="多个关键词用逗号分隔">
+        </div>
+      </label>
+      <div class="field field-wide">
+        <span class="field-heading">排除关键词 <span class="field-help" tabindex="0"
+            data-tooltip="用于排除 logo、广告位、头像等非目标图片；预设默认不勾选，也可自行补充。">?</span></span>
+        <div class="field-control field-control-multi">
+          <details class="multi-select" id="excludePresetDropdown">
+            <summary>
+              <span id="excludePresetLabel">未选择预设关键词</span>
+            </summary>
+            <div id="excludePresetOptions" class="multi-select-menu"></div>
+          </details>
+          <input id="excludeInput" type="text" placeholder="额外排除关键词，多个关键词用逗号分隔">
+        </div>
+      </div>
+      <label class="field">
+        <span class="field-heading">域名过滤 <span class="field-help" tabindex="0"
+            data-tooltip="只显示地址中包含该域名片段的图片。">?</span></span>
+        <div class="field-control">
+          <input id="domainInput" type="text" placeholder="例如 cdn.example.com">
+        </div>
+      </label>
+      <div class="field field-wide">
+        <span class="field-heading">格式筛选 <span class="field-help" tabindex="0"
+            data-tooltip="根据本次扫描到的图片格式自动汇总，默认全选。">?</span></span>
+        <div class="field-control">
+          <details class="multi-select" id="formatDropdown">
+            <summary>
+              <span id="formatLabel">全部格式</span>
+            </summary>
+            <div id="formatOptions" class="multi-select-menu"></div>
+          </details>
+        </div>
+      </div>
+    </div>
+    <details class="sub-panel">
+      <summary>更多筛选</summary>
+      <div class="advanced-filters">
+        <label class="field">
+          <span class="field-heading">布局模式 <span class="field-help" tabindex="0"
+              data-tooltip="控制预览图的排列方式。">?</span></span>
+          <div class="field-control">
+            <select id="layoutSelect">
+              <option value="grid">网格</option>
+              <option value="list">列表</option>
+              <option value="masonry">瀑布流</option>
+            </select>
+          </div>
+        </label>
+        <label class="field">
+          <span class="field-heading">预览尺寸 <span class="field-help" tabindex="0"
+              data-tooltip="控制预览卡片的缩略图显示大小。">?</span></span>
+          <div class="field-control">
+            <select id="sizeSelect">
+              <option value="small">小</option>
+              <option value="medium">中</option>
+              <option value="large">大</option>
+              <option value="xlarge">超大</option>
+            </select>
+          </div>
+        </label>
+        <label class="field">
+          <span class="field-heading">排序方式 <span class="field-help" tabindex="0"
+              data-tooltip="决定筛选结果的展示顺序。">?</span></span>
+          <div class="field-control">
+            <select id="sortSelect">
+              <option value="pageIndex">页序</option>
+              <option value="resolution">分辨率</option>
+              <option value="width">宽度</option>
+              <option value="height">高度</option>
+              <option value="url">URL</option>
+            </select>
+          </div>
+        </label>
+        <label class="field">
+          <span class="field-heading">去重模式 <span class="field-help" tabindex="0"
+              data-tooltip="保留唯一：重复项只留一张；完全去重：有重复的图片全部移除。">?</span></span>
+          <div class="field-control">
+            <select id="dedupeSelect">
+              <option value="none">不去重</option>
+              <option value="keep-one">保留唯一</option>
+              <option value="remove-all">完全去重</option>
+            </select>
+          </div>
+        </label>
+        <div class="field field-full size-filter">
+          <label class="toggle">
+            <input id="sizeFilterEnabled" type="checkbox">
+            <span class="field-heading">启用尺寸筛选 <span class="field-help" tabindex="0"
+                data-tooltip="默认关闭。启用后可用滑轮更细致地限制图片宽高范围。">?</span></span>
+          </label>
+          <div class="range-grid">
+            <label class="range-field">
+              <span>最小宽度</span>
+              <div class="range-control">
+                <input id="minWidthRange" type="range" min="0" max="1000" step="10" value="0">
+                <input id="minWidthNumber" type="number" min="0" step="10" value="0">
+              </div>
+            </label>
+            <label class="range-field">
+              <span>最大宽度</span>
+              <div class="range-control">
+                <input id="maxWidthRange" type="range" min="0" max="1000" step="10" value="1000">
+                <input id="maxWidthNumber" type="number" min="0" step="10" value="1000">
+              </div>
+            </label>
+            <label class="range-field">
+              <span>最小高度</span>
+              <div class="range-control">
+                <input id="minHeightRange" type="range" min="0" max="1000" step="10" value="0">
+                <input id="minHeightNumber" type="number" min="0" step="10" value="0">
+              </div>
+            </label>
+            <label class="range-field">
+              <span>最大高度</span>
+              <div class="range-control">
+                <input id="maxHeightRange" type="range" min="0" max="1000" step="10" value="1000">
+                <input id="maxHeightNumber" type="number" min="0" step="10" value="1000">
+              </div>
+            </label>
+          </div>
+        </div>
+      </div>
+    </details>
+  </details>
+
+  <section class="status">
+    <span id="countLabel">0 images</span>
+    <span id="selectionLabel">0/0 selected</span>
+    <button id="selectAllBtn" class="link">全选</button>
+    <button id="clearBtn" class="link">清空</button>
+    <button id="retry429Btn" class="link danger-link" hidden>重下 429</button>
+    <button id="stopRetryBtn" class="link danger-link" hidden>停止重试</button>
+  </section>
+
+  <main id="preview" class="preview grid medium"></main>
+  <div id="zoomModal" class="zoom-modal" hidden>
+    <div class="zoom-dialog" role="dialog" aria-modal="true" aria-labelledby="zoomTitle">
+      <div class="zoom-header">
+        <strong id="zoomTitle">图片预览</strong>
+        <button id="zoomCloseBtn" class="ghost" type="button">关闭</button>
+      </div>
+      <img id="zoomImage" alt="放大预览图">
+    </div>
+  </div>
+  <footer id="message" role="status"></footer>
+
+  <script type="module" src="./popup.js"></script>
+</body>
+
+</html>
