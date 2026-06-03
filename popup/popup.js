@@ -60,6 +60,8 @@ function bindEvents() {
     autoScroll: true,
     scrollDirection: $("#scrollDirectionSelect").value
   }));
+  $("#scrollToTop").addEventListener("click", () => scrollPageToEdge("top").catch((error) => setMessage(error.message)));
+  $("#scrollToBottom").addEventListener("click", () => scrollPageToEdge("bottom").catch((error) => setMessage(error.message)));
   $("#abortScrollBtn").addEventListener("click", abortAutoScroll);
   $("#downloadBtn").addEventListener("click", downloadSelected);
   $("#abortDownloadBtn").addEventListener("click", abortCurrentDownload);
@@ -111,6 +113,17 @@ function bindEvents() {
     if (multiSelectDetails.some((details) => details.contains(event.target))) return;
     multiSelectDetails.forEach((details) => details.removeAttribute("open"));
   });
+}
+
+async function scrollPageToEdge(edge) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) throw new Error("No active tab");
+  state.activeTabId = tab.id;
+  state.activeTabUrl = tab.url || "";
+  await ensureContentScript(tab);
+  const response = await sendTabMessage(tab.id, { type: "SCROLL_TO_EDGE", edge });
+  if (response?.error) throw new Error(response.error);
+  setMessage(edge === "bottom" ? "已滚动到页面底部。" : "已滚动到页面顶部。");
 }
 
 function bindMultiSelectClearButtons() {

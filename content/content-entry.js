@@ -98,6 +98,11 @@
       sendResponse({ ok: true });
       return false;
     }
+    if (message.type === "SCROLL_TO_EDGE") {
+      scrollToEdge(message.edge);
+      sendResponse({ ok: true });
+      return false;
+    }
     if (message.type === "FETCH_IMAGE_BLOB") {
       fetchImageAsDataUrl(message.url).then(sendResponse).catch((error) => sendResponse({
         ok: false,
@@ -139,6 +144,14 @@
 
   function isContextInvalidated(error) {
     return String(error?.message || error).includes("Extension context invalidated");
+  }
+
+  function scrollToEdge(edge) {
+    const root = document.scrollingElement || document.documentElement;
+    const maxTop = Math.max(0, (root.scrollHeight || 0) - window.innerHeight);
+    const prefersReduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    const behavior = prefersReduceMotion ? "auto" : "smooth";
+    window.scrollTo({ top: edge === "bottom" ? maxTop : 0, behavior });
   }
 
   async function fetchImageAsDataUrl(url) {
