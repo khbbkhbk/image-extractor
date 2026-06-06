@@ -4,7 +4,6 @@ import { buildFilename, buildMetadata, buildMetadataFilename, buildZipFilename }
 import { convertImageBlob } from "../preview/image-meta.js";
 import {
   abortDownloadSession,
-  blobToDownloadDataUrl,
   ensureDownloadSession,
   fetchImageBlob,
   isDownloadSessionAborted,
@@ -13,6 +12,7 @@ import {
   registerDownloadIdForSession,
   registerPendingFilenameSuggestion
 } from "./single-download.js";
+import { createOffscreenDownloadUrl, revokeOffscreenDownloadUrl } from "./offscreen-download.js";
 
 export async function downloadZip(images, context, config) {
   ensureDownloadSession(config.sessionId);
@@ -44,16 +44,22 @@ export async function downloadZip(images, context, config) {
 
   const blob = await zip.generateAsync({ type: "blob" });
   if (isDownloadSessionAborted(config.sessionId)) throw new Error("下载已中止");
-  const downloadUrl = await blobToDownloadDataUrl(blob);
+  const downloadUrl = await createOffscreenDownloadUrl(blob);
   const zipFilename = buildZipFilename(context);
   registerPendingFilenameSuggestion(downloadUrl, zipFilename, config.conflictAction);
-  const downloadId = await chrome.downloads.download({
-    url: downloadUrl,
-    filename: zipFilename,
-    conflictAction: normalizeConflict(config.conflictAction),
-    saveAs: false
-  });
-  registerDownloadIdForSession(config.sessionId, downloadId);
+  let downloadId = 0;
+  try {
+    downloadId = await chrome.downloads.download({
+      url: downloadUrl,
+      filename: zipFilename,
+      conflictAction: normalizeConflict(config.conflictAction),
+      saveAs: false
+    });
+  } catch (error) {
+    await revokeOffscreenDownloadUrl(downloadUrl);
+    throw error;
+  }
+  registerDownloadIdForSession(config.sessionId, downloadId, downloadUrl);
   markDownloadSessionSchedulingDone(config.sessionId);
   if (isDownloadSessionAborted(config.sessionId)) await abortDownloadSession(config.sessionId);
 

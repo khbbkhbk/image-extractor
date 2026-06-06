@@ -1,9 +1,11 @@
 import { TaskQueue } from "../core/task-queue.js";
 import { buildFilename, buildMetadata, buildMetadataFilename, buildSourceFilename } from "./filename-builder.js";
 import { fetchWithRetry } from "./retry-manager.js";
+import { createOffscreenDownloadUrl, createOffscreenDownloadUrlFromRemote, revokeOffscreenDownloadUrl } from "./offscreen-download.js";
 import { convertImageBlob } from "../preview/image-meta.js";
 
 const downloadSessions = new Map();
+const downloadBlobUrls = new Map();
 const pendingFilenameSuggestions = [];
 let downloadsListenerAttached = false;
 
@@ -78,11 +80,14 @@ async function downloadOne(image, context, index, config) {
   assertNotAborted(config.sessionId);
   const shouldConvert = config.format && config.format !== "original";
   const url = image.url || "";
-  const shouldMaterialize = shouldConvert || config.antiHotlink?.enabled || url.startsWith("blob:") || url.startsWith("data:");
+  const supportsDirectDownload = /^https?:\/\//i.test(url);
+  const shouldUseOffscreenRemoteFetch = !shouldConvert && supportsDirectDownload && config.antiHotlink?.enabled;
+  const shouldMaterialize = shouldConvert || !supportsDirectDownload || url.startsWith("blob:") || url.startsWith("data:");
   let filename = config.singleUseSourceFilename
     ? buildSourceFilename(image, index, config)
     : buildFilename(image, context, index, config);
   let downloadUrl = url;
+  let temporaryBlobUrl = "";
   let bytes = image.bytes || 0;
   let ext = image.ext;
   console.info("[CIE:download] Single image:", {
@@ -100,12 +105,16 @@ async function downloadOne(image, context, index, config) {
     const sourceBlob = await fetchImageBlob(image.url, config);
     assertNotAborted(config.sessionId);
     const converted = await convertImageBlob(sourceBlob, config.format, config.quality);
-    downloadUrl = await blobToDownloadDataUrl(converted.blob);
+    downloadUrl = await createOffscreenDownloadUrl(converted.blob);
+    temporaryBlobUrl = downloadUrl;
     ext = converted.ext;
     filename = config.singleUseSourceFilename
       ? buildSourceFilename(image, index, { ...config, ext })
       : buildFilename(image, context, index, { ...config, ext });
     bytes = converted.blob.size;
+  } else if (shouldUseOffscreenRemoteFetch) {
+    downloadUrl = await createOffscreenDownloadUrlFromRemote(url);
+    temporaryBlobUrl = downloadUrl;
   }
 
   assertNotAborted(config.sessionId);
@@ -119,32 +128,58 @@ async function downloadOne(image, context, index, config) {
     format: config.format || "original"
   });
   registerPendingFilenameSuggestion(downloadUrl, filename, config.conflictAction);
-  const downloadId = await chrome.downloads.download({
-    url: downloadUrl,
-    filename,
-    conflictAction: normalizeConflict(config.conflictAction),
-    saveAs: false
-  });
-  registerDownloadId(config.sessionId, downloadId);
+  let downloadId = 0;
+  try {
+    downloadId = await chrome.downloads.download({
+      url: downloadUrl,
+      filename,
+      conflictAction: normalizeConflict(config.conflictAction),
+      saveAs: false
+    });
+  } catch (error) {
+    if (temporaryBlobUrl) await revokeOffscreenDownloadUrl(temporaryBlobUrl);
+    throw error;
+  }
+  registerDownloadId(config.sessionId, downloadId, temporaryBlobUrl);
 
   return { ...image, pageIndex: index, filename, bytes, ext, downloadId };
 }
 
 export async function fetchImageBlob(url, config) {
   assertNotAborted(config.sessionId);
-  if (config.antiHotlink?.enabled && config.tabId && !url.startsWith("data:")) {
+  if (url.startsWith("data:")) {
+    const response = await fetch(url);
+    return response.blob();
+  }
+
+  const requiresPageContextFetch = url.startsWith("blob:");
+  if (!requiresPageContextFetch) {
+    try {
+      const response = await fetchWithRetry(url, config);
+      return response.blob();
+    } catch (error) {
+      if (!config.antiHotlink?.enabled || !config.tabId) throw error;
+      if (getErrorStatus(error) === 429) throw error;
+      console.warn("[CIE:download] Background image fetch failed, fallback to page-context fetch.", error);
+    }
+  }
+
+  if (config.tabId) {
     try {
       const response = await chrome.tabs.sendMessage(config.tabId, { type: "FETCH_IMAGE_BLOB", url });
       if (response?.ok && response.dataUrl) return await (await fetch(response.dataUrl)).blob();
       if (response?.status) throw createStatusError(response.status, response.error);
       if (response?.error) throw new Error(response.error);
     } catch (error) {
-      if (getErrorStatus(error) === 429) throw error;
-      console.warn("[CIE:download] Page-context image fetch failed, fallback to background fetch.", error);
+      const message = String(error?.message || error || "");
+      if (/quota exceeded/i.test(message)) {
+        throw new Error("页面上下文取图时触发浏览器配额限制。建议关闭防盗链后重试，或改用 ZIP 模式、减少单次下载数量。");
+      }
+      throw error;
     }
   }
-  const response = url.startsWith("data:") ? await fetch(url) : await fetchWithRetry(url, config);
-  return response.blob();
+
+  throw new Error("当前图片需要页面上下文取图，但未获取到可用标签页上下文。");
 }
 
 function createIntervalGate(intervalMs) {
@@ -219,8 +254,13 @@ function markSchedulingDoneInternal(sessionId) {
   scheduleSessionCleanup(sessionId, 10 * 60 * 1000);
 }
 
-function registerDownloadId(sessionId, downloadId) {
-  if (!sessionId || !downloadId) return;
+function registerDownloadId(sessionId, downloadId, temporaryBlobUrl = "") {
+  if (!downloadId) {
+    if (temporaryBlobUrl) revokeOffscreenDownloadUrl(temporaryBlobUrl).catch(() => { });
+    return;
+  }
+  if (temporaryBlobUrl) downloadBlobUrls.set(downloadId, temporaryBlobUrl);
+  if (!sessionId) return;
   const session = downloadSessions.get(sessionId);
   if (!session) return;
   session.downloadIds.add(downloadId);
@@ -253,8 +293,8 @@ export function ensureDownloadSession(sessionId) {
   initSession(sessionId);
 }
 
-export function registerDownloadIdForSession(sessionId, downloadId) {
-  registerDownloadId(sessionId, downloadId);
+export function registerDownloadIdForSession(sessionId, downloadId, temporaryBlobUrl = "") {
+  registerDownloadId(sessionId, downloadId, temporaryBlobUrl);
 }
 
 export function markDownloadSessionSchedulingDone(sessionId) {
@@ -291,6 +331,7 @@ function attachDownloadsListener() {
     if (!delta?.id || !delta?.state?.current) return;
     const state = delta.state.current;
     if (state !== "complete" && state !== "interrupted") return;
+    cleanupDownloadBlobUrl(delta.id);
     for (const [sessionId, session] of downloadSessions.entries()) {
       if (!session.downloadIds.has(delta.id)) continue;
       session.completedIds.add(delta.id);
@@ -302,6 +343,13 @@ function attachDownloadsListener() {
       }
     }
   });
+}
+
+function cleanupDownloadBlobUrl(downloadId) {
+  const url = downloadBlobUrls.get(downloadId);
+  if (!url) return;
+  downloadBlobUrls.delete(downloadId);
+  revokeOffscreenDownloadUrl(url).catch(() => { });
 }
 
 function prunePendingFilenameSuggestions() {

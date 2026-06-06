@@ -14,6 +14,7 @@
     "declarativeNetRequest",
     "declarativeNetRequestWithHostAccess",
     "downloads",
+    "offscreen",
     "sidePanel",
     "scripting",
     "storage",
