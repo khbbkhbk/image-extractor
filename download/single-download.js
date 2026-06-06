@@ -34,7 +34,13 @@ export async function downloadSingleImages(images, context, config) {
           total: images.length
         });
       } catch (error) {
-        failures.push(createFailure(image, index, error));
+        const failure = createFailure(image, index, error);
+        logDownloadFailure("single-image", error, {
+          index,
+          image,
+          failure
+        });
+        failures.push(failure);
         const failureSummary = summarizeFailures(failures);
         emitProgress(config, {
           completed: results.length,
@@ -58,12 +64,21 @@ export async function downloadSingleImages(images, context, config) {
     const metadataUrl = jsonDataUrl(metadata);
     const metadataFilename = buildMetadataFilename(context);
     registerPendingFilenameSuggestion(metadataUrl, metadataFilename, config.conflictAction);
-    const downloadId = await chrome.downloads.download({
-      url: metadataUrl,
-      filename: metadataFilename,
-      conflictAction: normalizeConflict(config.conflictAction),
-      saveAs: false
-    });
+    let downloadId = 0;
+    try {
+      downloadId = await chrome.downloads.download({
+        url: metadataUrl,
+        filename: metadataFilename,
+        conflictAction: normalizeConflict(config.conflictAction),
+        saveAs: false
+      });
+    } catch (error) {
+      logDownloadFailure("metadata-submit", error, {
+        filename: metadataFilename,
+        url: metadataUrl
+      });
+      throw error;
+    }
     registerDownloadId(config.sessionId, downloadId, "", {
       kind: "metadata",
       filename: metadataFilename
@@ -165,6 +180,12 @@ async function downloadOne(image, context, index, config) {
     });
   } catch (error) {
     if (temporaryBlobUrl) await revokeOffscreenDownloadUrl(temporaryBlobUrl);
+    logDownloadFailure("single-submit", error, {
+      index,
+      image,
+      downloadUrl,
+      filename
+    });
     throw error;
   }
   registerDownloadId(config.sessionId, downloadId, temporaryBlobUrl, {
@@ -212,6 +233,25 @@ export async function fetchImageBlob(url, config) {
   }
 
   throw new Error("当前图片需要页面上下文取图，但未获取到可用标签页上下文。");
+}
+
+export function logDownloadFailure(stage, error, extra = {}) {
+  const failure = extra.failure || createFailure(extra.image || null, extra.index || 0, error);
+  console.error("[CIE:download] Failure:", {
+    stage,
+    kind: failure.kind,
+    retryPolicy: failure.retryPolicy,
+    label: failure.label,
+    code: failure.code,
+    status: failure.status,
+    message: failure.message,
+    index: extra.index || failure.index || 0,
+    url: extra.url || failure.url || extra.image?.url || "",
+    filename: extra.filename || extra.image?.filename || "",
+    downloadUrl: extra.downloadUrl || "",
+    interruptReason: extra.interruptReason || "",
+    image: extra.image || failure.image || null
+  }, error);
 }
 
 function createIntervalGate(intervalMs) {
@@ -474,7 +514,16 @@ function attachDownloadsListener() {
       if (!session.downloadIds.has(delta.id)) continue;
       if (state === "interrupted" && !session.interruptedIds.has(delta.id)) {
         const failure = createInterruptedFailure(session.downloadMeta.get(delta.id), delta.error?.current);
-        if (failure) session.runtimeFailures.push(failure);
+        if (failure) {
+          logDownloadFailure("downloads-interrupted", new Error(failure.message), {
+            failure,
+            index: failure.index,
+            image: failure.image,
+            url: failure.url,
+            interruptReason: delta.error?.current || ""
+          });
+          session.runtimeFailures.push(failure);
+        }
         session.interruptedIds.add(delta.id);
         sendSessionStatus(sessionId, { failureSummary: summarizeSessionFailures(session) });
       }

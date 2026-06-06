@@ -7,6 +7,7 @@ import {
   ensureDownloadSession,
   fetchImageBlob,
   isDownloadSessionAborted,
+  logDownloadFailure,
   markDownloadSessionSchedulingDone,
   normalizeConflict,
   registerDownloadIdForSession,
@@ -21,27 +22,35 @@ export async function downloadZip(images, context, config) {
   const completed = [];
 
   await Promise.all(images.map((image, itemIndex) => queue.add(async () => {
-    if (isDownloadSessionAborted(config.sessionId)) throw new Error("下载已中止");
     const index = itemIndex + 1;
-    console.info("[CIE:download] Zip image:", {
-      index,
-      url: image.url,
-      originalUrl: image.originalUrl,
-      editedUrl: image.editedUrl
-    });
-    const sourceBlob = await fetchImageBlob(image.url, config);
-    if (isDownloadSessionAborted(config.sessionId)) throw new Error("下载已中止");
-    let converted;
     try {
-      converted = await convertImageBlob(sourceBlob, config.format, config.quality);
+      if (isDownloadSessionAborted(config.sessionId)) throw new Error("下载已中止");
+      console.info("[CIE:download] Zip image:", {
+        index,
+        url: image.url,
+        originalUrl: image.originalUrl,
+        editedUrl: image.editedUrl
+      });
+      const sourceBlob = await fetchImageBlob(image.url, config);
+      if (isDownloadSessionAborted(config.sessionId)) throw new Error("下载已中止");
+      let converted;
+      try {
+        converted = await convertImageBlob(sourceBlob, config.format, config.quality);
+      } catch (error) {
+        const conversionError = new Error(`格式转换失败：${error?.message || error}`);
+        conversionError.code = "FORMAT_CONVERSION_ERROR";
+        throw conversionError;
+      }
+      const filename = buildFilename(image, context, index, { ...config, ext: converted.ext });
+      zip.file(filename, converted.blob);
+      completed.push({ ...image, pageIndex: index, filename, bytes: converted.blob.size, ext: converted.ext, hash: converted.hash });
     } catch (error) {
-      const conversionError = new Error(`格式转换失败：${error?.message || error}`);
-      conversionError.code = "FORMAT_CONVERSION_ERROR";
-      throw conversionError;
+      logDownloadFailure("zip-image", error, {
+        index,
+        image
+      });
+      throw error;
     }
-    const filename = buildFilename(image, context, index, { ...config, ext: converted.ext });
-    zip.file(filename, converted.blob);
-    completed.push({ ...image, pageIndex: index, filename, bytes: converted.blob.size, ext: converted.ext, hash: converted.hash });
   })));
 
   const ordered = completed.sort((a, b) => a.pageIndex - b.pageIndex);
@@ -49,9 +58,25 @@ export async function downloadZip(images, context, config) {
     zip.file(buildMetadataFilename(context), JSON.stringify(buildMetadata(context, ordered), null, 2));
   }
 
-  const blob = await zip.generateAsync({ type: "blob" });
+  let blob;
+  try {
+    blob = await zip.generateAsync({ type: "blob" });
+  } catch (error) {
+    logDownloadFailure("zip-generate", error, {
+      filename: buildZipFilename(context)
+    });
+    throw error;
+  }
   if (isDownloadSessionAborted(config.sessionId)) throw new Error("下载已中止");
-  const downloadUrl = await createOffscreenDownloadUrl(blob);
+  let downloadUrl = "";
+  try {
+    downloadUrl = await createOffscreenDownloadUrl(blob);
+  } catch (error) {
+    logDownloadFailure("zip-offscreen-url", error, {
+      filename: buildZipFilename(context)
+    });
+    throw error;
+  }
   const zipFilename = buildZipFilename(context);
   registerPendingFilenameSuggestion(downloadUrl, zipFilename, config.conflictAction);
   let downloadId = 0;
@@ -64,6 +89,10 @@ export async function downloadZip(images, context, config) {
     });
   } catch (error) {
     await revokeOffscreenDownloadUrl(downloadUrl);
+    logDownloadFailure("zip-submit", error, {
+      filename: zipFilename,
+      downloadUrl
+    });
     throw error;
   }
   registerDownloadIdForSession(config.sessionId, downloadId, downloadUrl, {

@@ -33,7 +33,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "DOWNLOAD_IMAGES") {
     downloadManager.download(message.payload)
       .then((result) => sendResponse({ ok: true, result }))
-      .catch((error) => sendResponse({ ok: false, error: error.message }));
+      .catch((error) => {
+        console.error("[CIE:download] Download request failed:", {
+          mode: message.payload?.options?.mode || "auto",
+          imageCount: Array.isArray(message.payload?.images) ? message.payload.images.length : 0,
+          tabId: message.payload?.tabId || 0,
+          context: message.payload?.context || {}
+        }, error);
+        sendResponse({ ok: false, error: error.message });
+      });
     return true;
   }
 
