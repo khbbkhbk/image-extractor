@@ -31,7 +31,14 @@ export async function downloadZip(images, context, config) {
     });
     const sourceBlob = await fetchImageBlob(image.url, config);
     if (isDownloadSessionAborted(config.sessionId)) throw new Error("下载已中止");
-    const converted = await convertImageBlob(sourceBlob, config.format, config.quality);
+    let converted;
+    try {
+      converted = await convertImageBlob(sourceBlob, config.format, config.quality);
+    } catch (error) {
+      const conversionError = new Error(`格式转换失败：${error?.message || error}`);
+      conversionError.code = "FORMAT_CONVERSION_ERROR";
+      throw conversionError;
+    }
     const filename = buildFilename(image, context, index, { ...config, ext: converted.ext });
     zip.file(filename, converted.blob);
     completed.push({ ...image, pageIndex: index, filename, bytes: converted.blob.size, ext: converted.ext, hash: converted.hash });
@@ -59,7 +66,10 @@ export async function downloadZip(images, context, config) {
     await revokeOffscreenDownloadUrl(downloadUrl);
     throw error;
   }
-  registerDownloadIdForSession(config.sessionId, downloadId, downloadUrl);
+  registerDownloadIdForSession(config.sessionId, downloadId, downloadUrl, {
+    kind: "archive",
+    images
+  });
   markDownloadSessionSchedulingDone(config.sessionId);
   if (isDownloadSessionAborted(config.sessionId)) await abortDownloadSession(config.sessionId);
 

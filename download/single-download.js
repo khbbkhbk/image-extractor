@@ -25,18 +25,22 @@ export async function downloadSingleImages(images, context, config) {
       try {
         const downloaded = await downloadOne(image, context, index, config);
         results.push(downloaded);
+        const failureSummary = summarizeFailures(failures);
         emitProgress(config, {
           completed: results.length,
           failed: failures.length,
-          rateLimited: failures.filter((failure) => failure.status === 429).length,
+          rateLimited: failureSummary.rateLimitedCount,
+          timedOut: failureSummary.timeoutCount,
           total: images.length
         });
       } catch (error) {
         failures.push(createFailure(image, index, error));
+        const failureSummary = summarizeFailures(failures);
         emitProgress(config, {
           completed: results.length,
           failed: failures.length,
-          rateLimited: failures.filter((failure) => failure.status === 429).length,
+          rateLimited: failureSummary.rateLimitedCount,
+          timedOut: failureSummary.timeoutCount,
           total: images.length
         });
       }
@@ -60,17 +64,33 @@ export async function downloadSingleImages(images, context, config) {
       conflictAction: normalizeConflict(config.conflictAction),
       saveAs: false
     });
-    registerDownloadId(config.sessionId, downloadId);
+    registerDownloadId(config.sessionId, downloadId, "", {
+      kind: "metadata",
+      filename: metadataFilename
+    });
   }
 
-  const rateLimitedImages = failures.filter((failure) => failure.status === 429).map((failure) => failure.image);
+  setSessionPreSubmitFailures(config.sessionId, failures);
+  const failureSummary = summarizeFailures(failures);
   return {
     mode: "single",
     count: results.length,
     requestedCount: images.length,
     failedCount: failures.length,
-    rateLimitedCount: rateLimitedImages.length,
-    rateLimitedImages,
+    rateLimitedCount: failureSummary.rateLimitedCount,
+    rateLimitedImages: failureSummary.rateLimitedImages,
+    timeoutCount: failureSummary.timeoutCount,
+    timeoutImages: failureSummary.timeoutImages,
+    transientNetworkCount: failureSummary.transientNetworkCount,
+    interruptedTransientCount: failureSummary.interruptedTransientCount,
+    autoRetryCount: failureSummary.autoRetryCount,
+    autoRetryImages: failureSummary.autoRetryImages,
+    manualRetryCount: failureSummary.manualRetryCount,
+    manualRetryImages: failureSummary.manualRetryImages,
+    promptOnlyCount: failureSummary.promptOnlyCount,
+    promptOnlyMessages: failureSummary.promptOnlyMessages,
+    autoRetryLabels: failureSummary.autoRetryLabels,
+    manualRetryLabels: failureSummary.manualRetryLabels,
     failures,
     results
   };
@@ -104,7 +124,14 @@ async function downloadOne(image, context, index, config) {
     assertNotAborted(config.sessionId);
     const sourceBlob = await fetchImageBlob(image.url, config);
     assertNotAborted(config.sessionId);
-    const converted = await convertImageBlob(sourceBlob, config.format, config.quality);
+    let converted;
+    try {
+      converted = await convertImageBlob(sourceBlob, config.format, config.quality);
+    } catch (error) {
+      const conversionError = new Error(`格式转换失败：${error?.message || error}`);
+      conversionError.code = "FORMAT_CONVERSION_ERROR";
+      throw conversionError;
+    }
     downloadUrl = await createOffscreenDownloadUrl(converted.blob);
     temporaryBlobUrl = downloadUrl;
     ext = converted.ext;
@@ -140,7 +167,12 @@ async function downloadOne(image, context, index, config) {
     if (temporaryBlobUrl) await revokeOffscreenDownloadUrl(temporaryBlobUrl);
     throw error;
   }
-  registerDownloadId(config.sessionId, downloadId, temporaryBlobUrl);
+  registerDownloadId(config.sessionId, downloadId, temporaryBlobUrl, {
+    kind: "image",
+    image,
+    index,
+    filename
+  });
 
   return { ...image, pageIndex: index, filename, bytes, ext, downloadId };
 }
@@ -201,12 +233,44 @@ function delay(ms) {
 }
 
 function createFailure(image, index, error) {
+  const descriptor = classifyFailure(error);
   return {
     image,
+    images: image ? [image] : [],
     index,
     url: image.url,
     status: getErrorStatus(error),
+    kind: descriptor.kind,
+    retryPolicy: descriptor.retryPolicy,
+    label: descriptor.label,
+    code: descriptor.code || "",
     message: error?.message || String(error)
+  };
+}
+
+function summarizeFailures(failures) {
+  const rateLimitedFailures = failures.filter((failure) => failure.kind === "rate-limited");
+  const timeoutFailures = failures.filter((failure) => failure.kind === "timeout");
+  const transientNetworkFailures = failures.filter((failure) => failure.kind === "network-transient");
+  const interruptedTransientFailures = failures.filter((failure) => failure.kind === "download-interrupted-temporary");
+  const autoRetryFailures = failures.filter((failure) => failure.retryPolicy === "auto");
+  const manualRetryFailures = failures.filter((failure) => failure.retryPolicy === "manual");
+  const promptOnlyFailures = failures.filter((failure) => failure.retryPolicy === "none");
+  return {
+    rateLimitedCount: rateLimitedFailures.length,
+    rateLimitedImages: uniqueFailureImages(rateLimitedFailures),
+    timeoutCount: timeoutFailures.length,
+    timeoutImages: uniqueFailureImages(timeoutFailures),
+    transientNetworkCount: transientNetworkFailures.length,
+    interruptedTransientCount: interruptedTransientFailures.length,
+    autoRetryCount: autoRetryFailures.length,
+    autoRetryImages: uniqueFailureImages(autoRetryFailures),
+    manualRetryCount: manualRetryFailures.length,
+    manualRetryImages: uniqueFailureImages(manualRetryFailures),
+    promptOnlyCount: promptOnlyFailures.length,
+    promptOnlyMessages: uniqueFailureMessages(promptOnlyFailures),
+    autoRetryLabels: uniqueFailureLabels(autoRetryFailures),
+    manualRetryLabels: uniqueFailureLabels(manualRetryFailures)
   };
 }
 
@@ -214,6 +278,68 @@ function getErrorStatus(error) {
   if (Number.isFinite(error?.status)) return Number(error.status);
   const match = String(error?.message || error).match(/\bHTTP\s+(\d{3})\b/);
   return match ? Number(match[1]) : 0;
+}
+
+function classifyFailure(error) {
+  const status = getErrorStatus(error);
+  const message = String(error?.message || error || "");
+  if (status === 429) {
+    return { kind: "rate-limited", retryPolicy: "auto", label: "429", code: "HTTP_429" };
+  }
+  if (isTimeoutError(error)) {
+    return { kind: "timeout", retryPolicy: "auto", label: "超时", code: "TIMEOUT" };
+  }
+  if (isTransientNetworkError(error)) {
+    return { kind: "network-transient", retryPolicy: "auto", label: "网络波动", code: "NETWORK_TRANSIENT" };
+  }
+  if (status === 403) {
+    return { kind: "http-403", retryPolicy: "manual", label: "403", code: "HTTP_403" };
+  }
+  if (status === 404) {
+    return { kind: "http-404", retryPolicy: "manual", label: "404", code: "HTTP_404" };
+  }
+  if (isFilenameError(message)) {
+    return { kind: "filename", retryPolicy: "manual", label: "命名异常", code: "FILENAME_ERROR" };
+  }
+  if (isFormatConversionError(error)) {
+    return { kind: "format-conversion", retryPolicy: "manual", label: "格式转换失败", code: "FORMAT_CONVERSION_ERROR" };
+  }
+  if (isInvalidParameterError(error)) {
+    return { kind: "invalid-params", retryPolicy: "none", label: "参数错误", code: "INVALID_PARAMS" };
+  }
+  return { kind: "other", retryPolicy: "manual", label: "其他失败", code: "OTHER" };
+}
+
+function isTimeoutError(error) {
+  const status = getErrorStatus(error);
+  if (status === 408 || status === 504) return true;
+  const message = String(error?.message || error || "");
+  return /\b(ERR_CONNECTION_TIMED_OUT|ERR_TIMED_OUT|NETWORK_TIMEOUT)\b/i.test(message)
+    || /\b(connection timed out|request timed out|timed out|timeout after \d+ms)\b/i.test(message);
+}
+
+function isTransientNetworkError(error) {
+  const message = String(error?.message || error || "");
+  return /\b(ERR_(NETWORK_CHANGED|INTERNET_DISCONNECTED|CONNECTION_(RESET|ABORTED|CLOSED)|NAME_NOT_RESOLVED|ADDRESS_UNREACHABLE|NETWORK_IO_SUSPENDED))\b/i.test(message)
+    || /\b(network changed|internet disconnected|connection reset|connection aborted|connection closed|dns lookup failed|network error)\b/i.test(message);
+}
+
+function isFilenameError(message) {
+  return /\b(invalid filename|filename.*(invalid|too long)|path too long|file name too long)\b/i.test(message)
+    || /(文件名异常|命名异常|命名模板|文件名过长)/.test(message);
+}
+
+function isFormatConversionError(error) {
+  const message = String(error?.message || error || "");
+  return error?.code === "FORMAT_CONVERSION_ERROR"
+    || /\b(createImageBitmap|convertToBlob|OffscreenCanvas|canvas conversion|image decode)\b/i.test(message)
+    || /(格式转换失败|图像转换失败|图片解码失败)/.test(message);
+}
+
+function isInvalidParameterError(error) {
+  const message = String(error?.message || error || "");
+  return /\b(No images selected|No active tab)\b/i.test(message)
+    || /(图片地址格式无效|远程下载地址必须是 HTTP 或 HTTPS|当前图片需要页面上下文取图，但未获取到可用标签页上下文|当前页面不支持内容脚本|下载内容必须是 Blob|参数错误)/.test(message);
 }
 
 function createStatusError(status, message = "") {
@@ -240,6 +366,10 @@ function initSession(sessionId) {
     schedulingDone: false,
     downloadIds: new Set(),
     completedIds: new Set(),
+    preSubmitFailures: [],
+    runtimeFailures: [],
+    downloadMeta: new Map(),
+    interruptedIds: new Set(),
     cleanupTimer: 0
   });
   sendSessionStatus(sessionId);
@@ -254,7 +384,7 @@ function markSchedulingDoneInternal(sessionId) {
   scheduleSessionCleanup(sessionId, 10 * 60 * 1000);
 }
 
-function registerDownloadId(sessionId, downloadId, temporaryBlobUrl = "") {
+function registerDownloadId(sessionId, downloadId, temporaryBlobUrl = "", meta = null) {
   if (!downloadId) {
     if (temporaryBlobUrl) revokeOffscreenDownloadUrl(temporaryBlobUrl).catch(() => { });
     return;
@@ -264,6 +394,7 @@ function registerDownloadId(sessionId, downloadId, temporaryBlobUrl = "") {
   const session = downloadSessions.get(sessionId);
   if (!session) return;
   session.downloadIds.add(downloadId);
+  if (meta) session.downloadMeta.set(downloadId, meta);
   sendSessionStatus(sessionId);
 }
 
@@ -293,8 +424,8 @@ export function ensureDownloadSession(sessionId) {
   initSession(sessionId);
 }
 
-export function registerDownloadIdForSession(sessionId, downloadId, temporaryBlobUrl = "") {
-  registerDownloadId(sessionId, downloadId, temporaryBlobUrl);
+export function registerDownloadIdForSession(sessionId, downloadId, temporaryBlobUrl = "", meta = null) {
+  registerDownloadId(sessionId, downloadId, temporaryBlobUrl, meta);
 }
 
 export function markDownloadSessionSchedulingDone(sessionId) {
@@ -310,6 +441,13 @@ export function registerPendingFilenameSuggestion(url, filename, conflictAction 
     createdAt: Date.now()
   });
   prunePendingFilenameSuggestions();
+}
+
+function setSessionPreSubmitFailures(sessionId, failures) {
+  if (!sessionId) return;
+  const session = downloadSessions.get(sessionId);
+  if (!session) return;
+  session.preSubmitFailures = Array.isArray(failures) ? [...failures] : [];
 }
 
 function attachDownloadsListener() {
@@ -334,10 +472,19 @@ function attachDownloadsListener() {
     cleanupDownloadBlobUrl(delta.id);
     for (const [sessionId, session] of downloadSessions.entries()) {
       if (!session.downloadIds.has(delta.id)) continue;
+      if (state === "interrupted" && !session.interruptedIds.has(delta.id)) {
+        const failure = createInterruptedFailure(session.downloadMeta.get(delta.id), delta.error?.current);
+        if (failure) session.runtimeFailures.push(failure);
+        session.interruptedIds.add(delta.id);
+        sendSessionStatus(sessionId, { failureSummary: summarizeSessionFailures(session) });
+      }
       session.completedIds.add(delta.id);
       sendSessionStatus(sessionId);
       if (session.schedulingDone && session.completedIds.size >= session.downloadIds.size) {
-        sendSessionStatus(sessionId, { state: session.aborted ? "aborted" : "finished" });
+        sendSessionStatus(sessionId, {
+          state: session.aborted ? "aborted" : "finished",
+          failureSummary: summarizeSessionFailures(session)
+        });
         clearTimeout(session.cleanupTimer);
         downloadSessions.delete(sessionId);
       }
@@ -385,9 +532,132 @@ function sendSessionStatus(sessionId, override = {}) {
       schedulingDone: session.schedulingDone,
       aborted: session.aborted,
       state: session.aborted ? "aborted" : (session.schedulingDone && active === 0 ? "finished" : "active"),
+      failureSummary: override.failureSummary,
       ...override
     }
   }).catch(() => { });
+}
+
+function summarizeSessionFailures(session) {
+  return summarizeFailures([
+    ...(session?.preSubmitFailures || []),
+    ...(session?.runtimeFailures || [])
+  ]);
+}
+
+function createInterruptedFailure(meta, interruptReason = "") {
+  const descriptor = classifyInterruptedDownload(meta, interruptReason);
+  if (!descriptor) return null;
+  return {
+    image: descriptor.images[0] || null,
+    images: descriptor.images,
+    index: meta?.index || 0,
+    url: descriptor.images[0]?.url || "",
+    status: 0,
+    kind: descriptor.kind,
+    retryPolicy: descriptor.retryPolicy,
+    label: descriptor.label,
+    code: descriptor.code,
+    message: descriptor.message
+  };
+}
+
+function classifyInterruptedDownload(meta, interruptReason = "") {
+  const reason = String(interruptReason || "").trim().toUpperCase();
+  const images = meta?.kind === "archive"
+    ? Array.isArray(meta.images) ? meta.images : []
+    : meta?.kind === "image" && meta.image ? [meta.image] : [];
+  if (meta?.kind === "metadata") {
+    return {
+      kind: "metadata-interrupted",
+      retryPolicy: "none",
+      label: "metadata 下载失败",
+      code: reason || "METADATA_INTERRUPTED",
+      images: [],
+      message: `metadata 下载被浏览器中断${reason ? `（${reason}）` : ""}，请手动检查下载目录后按需重新导出。`
+    };
+  }
+  if (/^(NETWORK_(FAILED|TIMEOUT|DISCONNECTED)|SERVER_(FAILED|UNREACHABLE)|FILE_TRANSIENT_ERROR)$/.test(reason)) {
+    return {
+      kind: "download-interrupted-temporary",
+      retryPolicy: "auto",
+      label: "浏览器中断",
+      code: reason || "DOWNLOAD_INTERRUPTED_TEMPORARY",
+      images,
+      message: `浏览器下载阶段被临时中断${reason ? `（${reason}）` : ""}。`
+    };
+  }
+  if (/^(SERVER_FORBIDDEN|SERVER_UNAUTHORIZED)$/.test(reason)) {
+    return {
+      kind: "download-interrupted-auth",
+      retryPolicy: "manual",
+      label: reason === "SERVER_FORBIDDEN" ? "403" : "鉴权失败",
+      code: reason,
+      images,
+      message: `浏览器下载阶段被服务端拒绝${reason ? `（${reason}）` : ""}。`
+    };
+  }
+  if (/^(FILE_NAME_TOO_LONG|FILE_TOO_LARGE)$/.test(reason)) {
+    return {
+      kind: "filename",
+      retryPolicy: "manual",
+      label: "命名异常",
+      code: reason,
+      images,
+      message: `浏览器下载阶段因文件名或路径问题被中断${reason ? `（${reason}）` : ""}。`
+    };
+  }
+  if (/^(NETWORK_INVALID_REQUEST|USER_CANCELED)$/.test(reason)) {
+    return {
+      kind: "invalid-params",
+      retryPolicy: "none",
+      label: "参数错误",
+      code: reason,
+      images: [],
+      message: reason === "USER_CANCELED"
+        ? "浏览器侧已取消下载，本次不自动重试。"
+        : `浏览器下载请求参数无效${reason ? `（${reason}）` : ""}，请检查地址、命名模板或下载配置。`
+    };
+  }
+  return {
+    kind: "download-interrupted-other",
+    retryPolicy: "manual",
+    label: "浏览器中断",
+    code: reason || "DOWNLOAD_INTERRUPTED",
+    images,
+    message: `浏览器下载阶段被中断${reason ? `（${reason}）` : ""}。`
+  };
+}
+
+function uniqueFailureImages(failures) {
+  const unique = new Map();
+  for (const failure of failures) {
+    const images = Array.isArray(failure?.images)
+      ? failure.images
+      : failure?.image ? [failure.image] : [];
+    for (const image of images) {
+      if (!image) continue;
+      const key = image.id || image.url || image.originalUrl || JSON.stringify(image);
+      if (!unique.has(key)) unique.set(key, image);
+    }
+  }
+  return [...unique.values()];
+}
+
+function uniqueFailureMessages(failures) {
+  return [...new Set(
+    failures
+      .map((failure) => String(failure?.message || "").trim())
+      .filter(Boolean)
+  )];
+}
+
+function uniqueFailureLabels(failures) {
+  return [...new Set(
+    failures
+      .map((failure) => String(failure?.label || "").trim())
+      .filter(Boolean)
+  )];
 }
 
 export function normalizeConflict(conflictAction = "uniquify") {

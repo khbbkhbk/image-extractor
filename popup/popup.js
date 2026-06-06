@@ -12,7 +12,21 @@ const state = {
   config: null,
   layout: "grid",
   size: "medium",
+  autoRetryImages: [],
+  manualRetryImages: [],
+  promptOnlyMessages: [],
+  autoRetryLabels: [],
+  manualRetryLabels: [],
+  failureCounts: {
+    rateLimited: 0,
+    timedOut: 0,
+    transientNetwork: 0,
+    interruptedTransient: 0,
+    manualRetry: 0,
+    promptOnly: 0
+  },
   rateLimitedImages: [],
+  timeoutImages: [],
   activeSessionId: "",
   previewRunId: 0,
   retryTimer: 0,
@@ -65,7 +79,8 @@ function bindEvents() {
   $("#abortScrollBtn").addEventListener("click", abortAutoScroll);
   $("#downloadBtn").addEventListener("click", downloadSelected);
   $("#abortDownloadBtn").addEventListener("click", abortCurrentDownload);
-  $("#retry429Btn").addEventListener("click", retryRateLimited);
+  $("#retryAutoBtn").addEventListener("click", retryAutoFailures);
+  $("#retryManualBtn").addEventListener("click", retryManualFailures);
   $("#stopRetryBtn").addEventListener("click", stopAutoRetry);
   $("#selectAllBtn").addEventListener("click", () => {
     state.visibleImages.forEach((image) => state.selected.add(image.id));
@@ -150,18 +165,25 @@ function bindMultiSelectClearButtons() {
 
 chrome.runtime.onMessage.addListener((runtimeMessage, sender) => {
   if (runtimeMessage?.type === "DOWNLOAD_PROGRESS" && runtimeMessage.sessionId === state.activeSessionId) {
-    const { completed, failed, rateLimited, total } = runtimeMessage.payload;
-    setMessage(`下载中：成功 ${completed}/${total}，失败 ${failed}，429 ${rateLimited}`);
+    const { completed, failed, rateLimited, timedOut, total } = runtimeMessage.payload;
+    const timeoutText = timedOut ? `，超时 ${timedOut}` : "";
+    setMessage(`下载中：成功 ${completed}/${total}，失败 ${failed}，429 ${rateLimited}${timeoutText}`);
     return;
   }
 
   if (runtimeMessage?.type === "DOWNLOAD_SESSION_STATUS" && runtimeMessage.sessionId === state.activeSessionId) {
     const status = runtimeMessage.payload || {};
     if (status.state === "finished") {
+      if (status.failureSummary) applyFailureSummary(status.failureSummary);
       showToast("下载已完成。");
       state.activeSessionId = "";
       setDownloadState(false);
-      if (state.rateLimitedImages.length && !state.autoRetryStopped) scheduleAutoRetry429();
+      const finishedSummaryText = buildFinishedFailureSummaryText();
+      if (finishedSummaryText) {
+        const promptText = state.promptOnlyMessages[0] ? `。${state.promptOnlyMessages[0]}` : "";
+        setMessage(`下载已完成：${finishedSummaryText}${promptText}`);
+      }
+      if (state.autoRetryImages.length && !state.autoRetryStopped) scheduleAutoRetryAuto();
       return;
     }
     if (status.state === "aborted") {
@@ -488,19 +510,27 @@ async function downloadSelected() {
   });
 }
 
-async function retryRateLimited() {
-  if (!state.rateLimitedImages.length) return;
+async function retryAutoFailures() {
+  if (!state.autoRetryImages.length) return;
   stopAutoRetry();
   state.autoRetryStopped = false;
-  await startDownload(state.rateLimitedImages, "正在重下 429 图片").catch((error) => {
+  await startDownload(state.autoRetryImages, `正在重下 ${getAutoRetryLabel()} 图片`).catch((error) => {
+    showToast(error.message || String(error));
+    setMessage(error.message || String(error));
+  });
+}
+
+async function retryManualFailures() {
+  if (!state.manualRetryImages.length) return;
+  stopAutoRetry({ silent: true });
+  await startDownload(state.manualRetryImages, `正在手动重试 ${getManualRetryLabel()} 图片`).catch((error) => {
     showToast(error.message || String(error));
     setMessage(error.message || String(error));
   });
 }
 
 async function startDownload(images, label, { autoRetry = false } = {}) {
-  state.rateLimitedImages = [];
-  $("#retry429Btn").hidden = true;
+  clearFailureSummary();
   $("#stopRetryBtn").hidden = !autoRetry;
   state.activeSessionId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   setDownloadState(true);
@@ -528,18 +558,21 @@ async function startDownload(images, label, { autoRetry = false } = {}) {
     setDownloadState(false);
     throw new Error(response.error);
   }
-  state.rateLimitedImages = response.result.rateLimitedImages || [];
-  $("#retry429Btn").hidden = state.rateLimitedImages.length === 0;
+  applyFailureSummary(response.result || {});
   const failedText = response.result.failedCount ? `，失败 ${response.result.failedCount}` : "";
   const rateLimitedText = response.result.rateLimitedCount ? `，429 ${response.result.rateLimitedCount}` : "";
-  const submittedText = `下载任务已创建：已提交 ${response.result.requestedCount || images.length} 张图片${failedText}${rateLimitedText}`;
+  const timeoutText = response.result.timeoutCount ? `，超时 ${response.result.timeoutCount}` : "";
+  const transientText = response.result.transientNetworkCount ? `，网络波动 ${response.result.transientNetworkCount}` : "";
+  const manualText = response.result.manualRetryCount ? `，手动重试 ${response.result.manualRetryCount}` : "";
+  const promptText = response.result.promptOnlyCount ? `，提示 ${response.result.promptOnlyCount}` : "";
+  const submittedText = `下载任务已创建：已提交 ${response.result.requestedCount || images.length} 张图片${failedText}${rateLimitedText}${timeoutText}${transientText}${manualText}${promptText}`;
   showToast(submittedText);
   setMessage(submittedText);
-  if (autoRetry && state.rateLimitedImages.length === 0) {
+  if (autoRetry && state.autoRetryImages.length === 0) {
     stopAutoRetry({ silent: true });
     return;
   }
-  if (state.rateLimitedImages.length && !state.autoRetryStopped) scheduleAutoRetry429();
+  if (state.autoRetryImages.length && !state.autoRetryStopped) scheduleAutoRetryAuto();
 }
 
 function setMessage(text) {
@@ -615,18 +648,18 @@ function clearPreviewState() {
   clearPreviewAntiHotlinkRules();
 }
 
-function scheduleAutoRetry429() {
+function scheduleAutoRetryAuto() {
   clearTimeout(state.retryTimer);
   state.autoRetryStopped = false;
   $("#stopRetryBtn").hidden = false;
-  setMessage(`检测到 ${state.rateLimitedImages.length} 张 429 图片，1 秒后自动重试。`);
+  setMessage(`检测到 ${state.autoRetryImages.length} 张${getAutoRetryLabel()}图片，1 秒后自动重试。`);
   state.retryTimer = setTimeout(() => {
-    if (state.autoRetryStopped || !state.rateLimitedImages.length) return;
+    if (state.autoRetryStopped || !state.autoRetryImages.length) return;
     if (state.isDownloading) {
-      scheduleAutoRetry429();
+      scheduleAutoRetryAuto();
       return;
     }
-    startDownload(state.rateLimitedImages, "自动重试 429 图片", { autoRetry: true }).catch((error) => setMessage(error.message));
+    startDownload(state.autoRetryImages, `自动重试 ${getAutoRetryLabel()} 图片`, { autoRetry: true }).catch((error) => setMessage(error.message));
   }, 1000);
 }
 
@@ -634,10 +667,87 @@ function stopAutoRetry({ silent = false } = {}) {
   state.autoRetryStopped = true;
   clearTimeout(state.retryTimer);
   $("#stopRetryBtn").hidden = true;
-  if (state.rateLimitedImages.length) $("#retry429Btn").hidden = false;
+  updateRetryControls();
   if (!silent) {
-    setMessage(state.rateLimitedImages.length ? `已停止自动重试，仍有 ${state.rateLimitedImages.length} 张 429 图片可手动重试。` : "已停止自动重试。");
+    setMessage(state.autoRetryImages.length ? `已停止自动重试，仍有 ${state.autoRetryImages.length} 张${getAutoRetryLabel()}图片可继续重试。` : "已停止自动重试。");
   }
+}
+
+function updateRetryControls() {
+  const autoRetryButton = $("#retryAutoBtn");
+  const manualRetryButton = $("#retryManualBtn");
+  if (autoRetryButton) {
+    autoRetryButton.hidden = state.autoRetryImages.length === 0;
+    autoRetryButton.textContent = getAutoRetryButtonLabel();
+  }
+  if (manualRetryButton) {
+    manualRetryButton.hidden = state.manualRetryImages.length === 0;
+    manualRetryButton.textContent = getManualRetryButtonLabel();
+  }
+}
+
+function applyFailureSummary(summary = {}) {
+  state.rateLimitedImages = summary.rateLimitedImages || [];
+  state.timeoutImages = summary.timeoutImages || [];
+  state.autoRetryImages = summary.autoRetryImages || [];
+  state.manualRetryImages = summary.manualRetryImages || [];
+  state.promptOnlyMessages = summary.promptOnlyMessages || [];
+  state.autoRetryLabels = summary.autoRetryLabels || [];
+  state.manualRetryLabels = summary.manualRetryLabels || [];
+  state.failureCounts = {
+    rateLimited: Number(summary.rateLimitedCount || 0),
+    timedOut: Number(summary.timeoutCount || 0),
+    transientNetwork: Number(summary.transientNetworkCount || 0),
+    interruptedTransient: Number(summary.interruptedTransientCount || 0),
+    manualRetry: Number(summary.manualRetryCount || 0),
+    promptOnly: Number(summary.promptOnlyCount || 0)
+  };
+  updateRetryControls();
+}
+
+function clearFailureSummary() {
+  applyFailureSummary({});
+}
+
+function getAutoRetryButtonLabel() {
+  if (state.failureCounts.transientNetwork || state.failureCounts.interruptedTransient) return "重下临时失败";
+  if (state.rateLimitedImages.length && state.timeoutImages.length) return "重下 429/超时";
+  if (state.timeoutImages.length) return "重下超时";
+  if (state.rateLimitedImages.length) return "重下 429";
+  return "重下临时失败";
+}
+
+function getManualRetryButtonLabel() {
+  if (state.manualRetryLabels.includes("403") && state.manualRetryLabels.includes("404")) return "手动重试 403/404";
+  if (state.manualRetryLabels.includes("命名异常") && state.manualRetryLabels.includes("格式转换失败")) return "手动重试命名/格式";
+  if (state.manualRetryLabels.length === 1) return `手动重试 ${state.manualRetryLabels[0]}`;
+  return "手动重试异常";
+}
+
+function getAutoRetryLabel() {
+  if (state.failureCounts.transientNetwork || state.failureCounts.interruptedTransient) return "临时失败";
+  if (state.rateLimitedImages.length && state.timeoutImages.length) return "429/超时";
+  if (state.timeoutImages.length) return "超时";
+  if (state.rateLimitedImages.length) return "429";
+  return "临时失败";
+}
+
+function getManualRetryLabel() {
+  if (state.manualRetryLabels.length === 1) return state.manualRetryLabels[0];
+  if (state.manualRetryLabels.includes("403") && state.manualRetryLabels.includes("404")) return "403/404";
+  if (state.manualRetryLabels.includes("命名异常") && state.manualRetryLabels.includes("格式转换失败")) return "命名/格式";
+  return "异常";
+}
+
+function buildFinishedFailureSummaryText() {
+  const parts = [];
+  if (state.failureCounts.rateLimited) parts.push(`429 ${state.failureCounts.rateLimited}`);
+  if (state.failureCounts.timedOut) parts.push(`超时 ${state.failureCounts.timedOut}`);
+  if (state.failureCounts.transientNetwork) parts.push(`网络波动 ${state.failureCounts.transientNetwork}`);
+  if (state.failureCounts.interruptedTransient) parts.push(`浏览器中断 ${state.failureCounts.interruptedTransient}`);
+  if (state.failureCounts.manualRetry) parts.push(`需手动重试 ${state.failureCounts.manualRetry}`);
+  if (state.failureCounts.promptOnly) parts.push(`提示 ${state.failureCounts.promptOnly}`);
+  return parts.join("，");
 }
 
 function getStableKey(image) {
