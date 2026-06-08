@@ -102,5 +102,23 @@ export async function downloadZip(images, context, config) {
   markDownloadSessionSchedulingDone(config.sessionId);
   if (isDownloadSessionAborted(config.sessionId)) await abortDownloadSession(config.sessionId);
 
-  return { mode: "zip", count: ordered.length, downloadId, bytes: blob.size, results: ordered };
+  return {
+    mode: "zip",
+    count: ordered.length,
+    downloadId,
+    bytes: blob.size,
+    results: ordered.map(createZipDownloadResponseSummary)
+  };
+}
+
+function createZipDownloadResponseSummary(result) {
+  return {
+    id: result?.id || "",
+    url: String(result?.url || "").trim(),
+    originalUrl: String(result?.originalUrl || result?.url || "").trim(),
+    filename: result?.filename || "",
+    ext: result?.ext || "",
+    bytes: Number(result?.bytes || 0) || 0,
+    pageIndex: Number(result?.pageIndex || 0) || 0
+  };
 }
