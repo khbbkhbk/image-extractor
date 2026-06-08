@@ -30,6 +30,8 @@ const state = {
   timeoutImages: [],
   activeSessionId: "",
   previewRunId: 0,
+  previewHydrationTimer: 0,
+  previewHydrationBusy: false,
   retryTimer: 0,
   autoRetryStopped: false,
   isDownloading: false,
@@ -444,7 +446,7 @@ function render() {
     onZoom: openZoomModal
   });
   prunePreviewObjectUrls();
-  hydrateVisiblePreviews();
+  schedulePreviewHydration();
 }
 
 function handleImageUrlChange(imageId, value) {
@@ -643,6 +645,9 @@ function wait(ms) {
 
 function clearPreviewState() {
   state.previewRunId += 1;
+  state.previewHydrationBusy = false;
+  clearTimeout(state.previewHydrationTimer);
+  state.previewHydrationTimer = 0;
   releaseAllPreviewObjectUrls();
   state.images = [];
   state.visibleImages = [];
@@ -801,60 +806,102 @@ function showToast(text, { durationMs = 2200 } = {}) {
   }, Math.max(600, Number(durationMs) || 2200));
 }
 
+function schedulePreviewHydration() {
+  if (state.previewHydrationBusy) return;
+  clearTimeout(state.previewHydrationTimer);
+  state.previewHydrationTimer = window.setTimeout(() => {
+    state.previewHydrationTimer = 0;
+    hydrateVisiblePreviews().catch((error) => console.warn("[CIE:popup] Preview hydration failed.", error));
+  }, 80);
+}
+
 async function hydrateVisiblePreviews() {
-  const candidates = state.visibleImages
-    .filter((image) => !image.previewUrl && !image.previewLoading && !image.previewFailed)
-    .slice(0, 24);
-  if (!candidates.length) return;
-
+  if (state.previewHydrationBusy) return;
+  state.previewHydrationBusy = true;
   const runId = ++state.previewRunId;
-  markPreviewState(candidates, { previewLoading: true });
+  try {
+    let batches = 0;
+    while (batches < 6) {
+      if (runId !== state.previewRunId) return;
+      const candidates = state.visibleImages
+        .filter((image) => image?.id && image?.url && !image.previewUrl && !image.previewLoading && !image.previewFailed)
+        .slice(0, 24);
+      if (!candidates.length) return;
 
-  const response = await chrome.runtime.sendMessage({
-    type: "FETCH_PREVIEW_IMAGES",
-    payload: {
-      images: candidates.map(createPreviewRequestImage),
-      context: createPreviewRequestContext(state.context),
-      config: createPreviewRequestConfig(state.config.download),
-      limit: candidates.length
+      markPreviewState(candidates, { previewLoading: true, previewError: "" });
+
+      const response = await chrome.runtime.sendMessage({
+        type: "FETCH_PREVIEW_IMAGES",
+        payload: {
+          images: candidates.map(createPreviewRequestImage),
+          context: createPreviewRequestContext(state.context),
+          config: createPreviewRequestConfig(state.config.download),
+          limit: candidates.length
+        }
+      }).catch((error) => ({ ok: false, error: error.message }));
+
+      if (runId !== state.previewRunId) {
+        await discardPreviewResponse(response?.result?.results || []);
+        return;
+      }
+
+      if (!response?.ok) {
+        await discardPreviewResponse(response?.result?.results || []);
+        markPreviewState(candidates, { previewLoading: false, previewFailed: true, previewError: response?.error || "预览请求失败" });
+        return;
+      }
+
+      const returnedIds = new Set();
+      for (const item of response.result.results || []) {
+        returnedIds.add(item.id);
+        const image = state.images.find((candidate) => candidate.id === item.id);
+        if (!image) {
+          await discardPreviewBlob(item.blobKey);
+          continue;
+        }
+        image.previewLoading = false;
+        if (item.ok) {
+          const previewUrl = await takePreviewObjectUrl(item.blobKey);
+          if (previewUrl) assignPreviewObjectUrl(image, previewUrl);
+          else {
+            image.previewFailed = true;
+            image.previewError = "预览缓存读取失败";
+          }
+          image.bytes = image.bytes || item.bytes || 0;
+        } else {
+          image.previewFailed = true;
+          image.previewError = item.error;
+        }
+      }
+
+      for (const candidate of candidates) {
+        if (!returnedIds.has(candidate.id)) {
+          markPreviewState([candidate], { previewLoading: false, previewFailed: true, previewError: "预览结果缺失" });
+        }
+      }
+
+      renderPreview(preview, state.visibleImages, {
+        layout: state.layout,
+        size: state.size,
+        selected: state.selected,
+        onSelectionChange: render,
+        onUrlChange: handleImageUrlChange,
+        onCopyUrl: copyImageUrl,
+        onOpenUrl: openImageUrl,
+        onZoom: openZoomModal
+      });
+      prunePreviewObjectUrls();
+
+      batches += 1;
+      await wait(0);
     }
-  }).catch((error) => ({ ok: false, error: error.message }));
-
-  if (runId !== state.previewRunId || !response?.ok) {
-    await discardPreviewResponse(response?.result?.results || []);
-    markPreviewState(candidates, { previewLoading: false, previewFailed: true });
-    return;
+  } finally {
+    state.previewHydrationBusy = false;
+    if (runId === state.previewRunId) {
+      const hasMore = state.visibleImages.some((image) => image?.id && image?.url && !image.previewUrl && !image.previewLoading && !image.previewFailed);
+      if (hasMore) schedulePreviewHydration();
+    }
   }
-
-  for (const item of response.result.results || []) {
-    const image = state.images.find((candidate) => candidate.id === item.id);
-    if (!image) {
-      await discardPreviewBlob(item.blobKey);
-      continue;
-    }
-    image.previewLoading = false;
-    if (item.ok) {
-      const previewUrl = await takePreviewObjectUrl(item.blobKey);
-      if (previewUrl) assignPreviewObjectUrl(image, previewUrl);
-      else image.previewFailed = true;
-      image.bytes = image.bytes || item.bytes || 0;
-    } else {
-      image.previewFailed = true;
-      image.previewError = item.error;
-    }
-  }
-
-  renderPreview(preview, state.visibleImages, {
-    layout: state.layout,
-    size: state.size,
-    selected: state.selected,
-    onSelectionChange: render,
-    onUrlChange: handleImageUrlChange,
-    onCopyUrl: copyImageUrl,
-    onOpenUrl: openImageUrl,
-    onZoom: openZoomModal
-  });
-  prunePreviewObjectUrls();
 }
 
 function markPreviewState(images, patch) {
