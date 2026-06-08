@@ -52,6 +52,7 @@ const state = {
   isAutoScrolling: false
 };
 
+
 const RANGE_KEYS = ["minWidth", "maxWidth", "minHeight", "maxHeight"];
 const $ = (selector) => document.querySelector(selector);
 const preview = $("#preview");
@@ -536,7 +537,8 @@ async function startDownload(images, label, { autoRetry = false } = {}) {
   setDownloadState(true);
   showToast(`${label}：${images.length} 张图片...`, { durationMs: 1600 });
   setMessage(`${label}：${images.length} 张图片...`);
-  console.info("[CIE:popup] Download request urls:", images.slice(0, 30).map((image) => ({
+  const downloadImages = images.map(createDownloadRequestImage);
+  console.info("[CIE:popup] Download request urls:", downloadImages.slice(0, 30).map((image) => ({
     id: image.id,
     url: image.url,
     originalUrl: image.originalUrl,
@@ -547,11 +549,13 @@ async function startDownload(images, label, { autoRetry = false } = {}) {
   const response = await chrome.runtime.sendMessage({
     type: "DOWNLOAD_IMAGES",
     payload: {
-      images,
+      images: downloadImages,
       context: state.context,
       options: { ...state.config.download, sessionId: state.activeSessionId },
       tabId: tab?.id
     }
+  }).catch((error) => {
+    throw error;
   });
   if (!response.ok) {
     state.activeSessionId = "";
@@ -1068,6 +1072,28 @@ function getSizeFilterValues() {
 function getEditableUrl(imageId) {
   const image = state.images.find((item) => item.id === imageId);
   return String(image?.editedUrl || image?.url || "").trim();
+}
+
+function createDownloadRequestImage(image) {
+  const editedUrl = String(image?.editedUrl || image?.url || "").trim();
+  return {
+    id: image?.id || "",
+    url: editedUrl || String(image?.url || "").trim(),
+    originalUrl: String(image?.originalUrl || image?.url || "").trim(),
+    editedUrl,
+    ext: image?.ext || "",
+    width: Number(image?.width || 0) || 0,
+    height: Number(image?.height || 0) || 0,
+    naturalWidth: Number(image?.naturalWidth || 0) || 0,
+    naturalHeight: Number(image?.naturalHeight || 0) || 0,
+    bytes: Number(image?.bytes || 0) || 0,
+    alt: image?.alt || "",
+    title: image?.title || "",
+    source: image?.source || "",
+    node: image?.node || "",
+    hash: image?.hash || "",
+    site: image?.site || ""
+  };
 }
 
 function parseCommaList(value = "") {

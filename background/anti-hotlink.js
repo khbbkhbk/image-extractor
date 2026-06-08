@@ -70,7 +70,7 @@ export class AntiHotlinkManager {
   async clearPreviewRules() {
     await chrome.declarativeNetRequest.updateSessionRules({
       removeRuleIds: this.previewRuleIds()
-    }).catch(() => {});
+    }).catch(() => { });
   }
 
   previewRuleIds() {

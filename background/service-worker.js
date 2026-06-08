@@ -8,6 +8,7 @@ import { abortDownloadSession } from "../download/single-download.js";
 
 displayModeManager.applyFromConfig().catch(console.error);
 
+
 chrome.runtime.onInstalled.addListener(async () => {
   const existing = await chrome.storage.local.get("config");
   if (!existing.config) await configManager.reset();

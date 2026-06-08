@@ -9,6 +9,7 @@ const downloadBlobUrls = new Map();
 const pendingFilenameSuggestions = [];
 let downloadsListenerAttached = false;
 
+
 export async function downloadSingleImages(images, context, config) {
   ensureDownloadSession(config.sessionId);
   const queue = new TaskQueue({ concurrency: config.concurrency });
@@ -106,8 +107,8 @@ export async function downloadSingleImages(images, context, config) {
     promptOnlyMessages: failureSummary.promptOnlyMessages,
     autoRetryLabels: failureSummary.autoRetryLabels,
     manualRetryLabels: failureSummary.manualRetryLabels,
-    failures,
-    results
+    failures: failures.map(createFailureResponseSummary),
+    results: results.map(createDownloadResponseSummary)
   };
 }
 
@@ -274,17 +275,68 @@ function delay(ms) {
 
 function createFailure(image, index, error) {
   const descriptor = classifyFailure(error);
+  const normalizedImage = createTransferImage(image);
   return {
-    image,
-    images: image ? [image] : [],
+    image: normalizedImage,
+    images: normalizedImage ? [normalizedImage] : [],
     index,
-    url: image.url,
+    url: normalizedImage?.url || "",
     status: getErrorStatus(error),
     kind: descriptor.kind,
     retryPolicy: descriptor.retryPolicy,
     label: descriptor.label,
     code: descriptor.code || "",
     message: error?.message || String(error)
+  };
+}
+
+function createTransferImage(image) {
+  if (!image) return null;
+  return {
+    id: image.id || "",
+    url: String(image.url || "").trim(),
+    originalUrl: String(image.originalUrl || image.url || "").trim(),
+    editedUrl: String(image.editedUrl || image.url || "").trim(),
+    ext: image.ext || "",
+    width: Number(image.width || 0) || 0,
+    height: Number(image.height || 0) || 0,
+    naturalWidth: Number(image.naturalWidth || 0) || 0,
+    naturalHeight: Number(image.naturalHeight || 0) || 0,
+    bytes: Number(image.bytes || 0) || 0,
+    alt: image.alt || "",
+    title: image.title || "",
+    source: image.source || "",
+    node: image.node || "",
+    hash: image.hash || "",
+    site: image.site || ""
+  };
+}
+
+function createDownloadResponseSummary(result) {
+  return {
+    id: result?.id || "",
+    url: String(result?.url || "").trim(),
+    originalUrl: String(result?.originalUrl || result?.url || "").trim(),
+    filename: result?.filename || "",
+    ext: result?.ext || "",
+    bytes: Number(result?.bytes || 0) || 0,
+    pageIndex: Number(result?.pageIndex || 0) || 0,
+    downloadId: Number(result?.downloadId || 0) || 0
+  };
+}
+
+function createFailureResponseSummary(failure) {
+  return {
+    index: Number(failure?.index || 0) || 0,
+    url: String(failure?.url || "").trim(),
+    status: Number(failure?.status || 0) || 0,
+    kind: failure?.kind || "",
+    retryPolicy: failure?.retryPolicy || "",
+    label: failure?.label || "",
+    code: failure?.code || "",
+    message: failure?.message || "",
+    image: createTransferImage(failure?.image),
+    images: Array.isArray(failure?.images) ? failure.images.map(createTransferImage).filter(Boolean) : []
   };
 }
 
