@@ -1,5 +1,6 @@
 import { PRESET_EXCLUDE_KEYWORDS } from "../core/config-manager.js";
 import { buildFilename, buildSourceFilename } from "../download/filename-builder.js";
+import { deleteTempBlob, takeTempBlob } from "../download/blob-store.js";
 import { filterImages, sortImages } from "../preview/filter-engine.js";
 import { renderPreview } from "../preview/preview-engine.js";
 import { createSelectionSummary } from "./components/image-card.js";
@@ -39,6 +40,7 @@ const state = {
   scheduledScan: 0,
   scheduledPayloadApply: 0,
   pendingPayload: null,
+  previewObjectUrls: new Map(),
   excludePresetOptions: [...PRESET_EXCLUDE_KEYWORDS],
   selectedExcludePresets: new Set(),
   formatOptions: [],
@@ -49,7 +51,8 @@ const state = {
     maxWidth: 1000,
     maxHeight: 1000
   },
-  isAutoScrolling: false
+  isAutoScrolling: false,
+  zoomedImageId: ""
 };
 
 
@@ -440,6 +443,7 @@ function render() {
     onOpenUrl: openImageUrl,
     onZoom: openZoomModal
   });
+  prunePreviewObjectUrls();
   hydrateVisiblePreviews();
 }
 
@@ -476,6 +480,7 @@ async function openImageUrl(imageId) {
 function openZoomModal(imageId) {
   const image = state.images.find((item) => item.id === imageId);
   if (!image) return;
+  state.zoomedImageId = imageId;
   const zoomImage = $("#zoomImage");
   zoomImage.src = image.previewUrl || getEditableUrl(imageId) || image.url;
   zoomImage.alt = image.alt || image.filename || "zoomed-image";
@@ -487,6 +492,7 @@ function closeZoomModal() {
   const zoomModal = $("#zoomModal");
   if (zoomModal.hidden) return;
   zoomModal.hidden = true;
+  state.zoomedImageId = "";
   $("#zoomImage").removeAttribute("src");
 }
 
@@ -637,6 +643,7 @@ function wait(ms) {
 
 function clearPreviewState() {
   state.previewRunId += 1;
+  releaseAllPreviewObjectUrls();
   state.images = [];
   state.visibleImages = [];
   state.selected.clear();
@@ -645,6 +652,7 @@ function clearPreviewState() {
   state.formatFilterTouched = false;
   state.sizeFilterTouched = false;
   preview.replaceChildren();
+  state.pendingPayload = null;
   $("#countLabel").textContent = "0 images";
   $("#selectionLabel").textContent = "0/0 selected";
   closeZoomModal();
@@ -805,24 +813,30 @@ async function hydrateVisiblePreviews() {
   const response = await chrome.runtime.sendMessage({
     type: "FETCH_PREVIEW_IMAGES",
     payload: {
-      images: candidates,
-      context: state.context,
-      config: state.config.download,
+      images: candidates.map(createPreviewRequestImage),
+      context: createPreviewRequestContext(state.context),
+      config: createPreviewRequestConfig(state.config.download),
       limit: candidates.length
     }
   }).catch((error) => ({ ok: false, error: error.message }));
 
   if (runId !== state.previewRunId || !response?.ok) {
+    await discardPreviewResponse(response?.result?.results || []);
     markPreviewState(candidates, { previewLoading: false, previewFailed: true });
     return;
   }
 
   for (const item of response.result.results || []) {
     const image = state.images.find((candidate) => candidate.id === item.id);
-    if (!image) continue;
+    if (!image) {
+      await discardPreviewBlob(item.blobKey);
+      continue;
+    }
     image.previewLoading = false;
     if (item.ok) {
-      image.previewUrl = item.previewUrl;
+      const previewUrl = await takePreviewObjectUrl(item.blobKey);
+      if (previewUrl) assignPreviewObjectUrl(image, previewUrl);
+      else image.previewFailed = true;
       image.bytes = image.bytes || item.bytes || 0;
     } else {
       image.previewFailed = true;
@@ -840,6 +854,7 @@ async function hydrateVisiblePreviews() {
     onOpenUrl: openImageUrl,
     onZoom: openZoomModal
   });
+  prunePreviewObjectUrls();
 }
 
 function markPreviewState(images, patch) {
@@ -854,9 +869,9 @@ async function installPreviewAntiHotlinkRules() {
   const response = await chrome.runtime.sendMessage({
     type: "INSTALL_PREVIEW_ANTI_HOTLINK",
     payload: {
-      images: state.images,
-      context: state.context,
-      config: state.config.download
+      images: buildPreviewRuleImages(state.images),
+      context: createPreviewRequestContext(state.context),
+      config: createPreviewRequestConfig(state.config.download)
     }
   });
   if (!response?.ok) console.warn("[CIE:popup] Failed to install preview anti-hotlink rules.", response?.error);
@@ -1096,6 +1111,124 @@ function createDownloadRequestImage(image) {
   };
 }
 
+function createPreviewRequestImage(image) {
+  return {
+    id: image?.id || "",
+    url: String(image?.url || "").trim()
+  };
+}
+
+function createPreviewRuleImage(image) {
+  return {
+    url: String(image?.url || "").trim()
+  };
+}
+
+function buildPreviewRuleImages(images = []) {
+  const seenHosts = new Set();
+  const results = [];
+  for (const image of images) {
+    const normalized = createPreviewRuleImage(image);
+    if (!normalized.url) continue;
+    const host = readPreviewRuleHost(normalized.url);
+    if (!host || seenHosts.has(host)) continue;
+    seenHosts.add(host);
+    results.push(normalized);
+    if (results.length >= 80) break;
+  }
+  return results;
+}
+
+function createPreviewRequestContext(context = {}) {
+  return {
+    sourceUrl: context?.sourceUrl || "",
+    url: context?.url || "",
+    pageTitle: context?.pageTitle || "",
+    site: context?.site || "",
+    comic: context?.comic || "",
+    chapter: context?.chapter || ""
+  };
+}
+
+function createPreviewRequestConfig(downloadConfig = {}) {
+  return {
+    antiHotlink: {
+      enabled: Boolean(downloadConfig?.antiHotlink?.enabled),
+      includeOrigin: Boolean(downloadConfig?.antiHotlink?.includeOrigin),
+      includeCookies: Boolean(downloadConfig?.antiHotlink?.includeCookies),
+      userAgent: downloadConfig?.antiHotlink?.userAgent || ""
+    }
+  };
+}
+
+function readPreviewRuleHost(url) {
+  try {
+    const parsed = new URL(url);
+    return /^https?:$/i.test(parsed.protocol) ? parsed.host : "";
+  } catch {
+    return "";
+  }
+}
+
+async function takePreviewObjectUrl(blobKey) {
+  if (!blobKey) return "";
+  const blob = await takeTempBlob(blobKey).catch(() => null);
+  return blob ? URL.createObjectURL(blob) : "";
+}
+
+async function discardPreviewResponse(items = []) {
+  const blobKeys = items
+    .filter((item) => item?.ok && item?.blobKey)
+    .map((item) => item.blobKey);
+  await Promise.all(blobKeys.map((blobKey) => discardPreviewBlob(blobKey)));
+}
+
+async function discardPreviewBlob(blobKey) {
+  if (!blobKey) return;
+  await deleteTempBlob(blobKey).catch(() => { });
+}
+
+function assignPreviewObjectUrl(image, nextUrl) {
+  if (!image) return;
+  revokePreviewObjectUrl(image.previewUrl);
+  image.previewUrl = nextUrl || "";
+  image.previewFailed = false;
+  image.previewError = "";
+  if (image.previewUrl) state.previewObjectUrls.set(image.id, image.previewUrl);
+  else state.previewObjectUrls.delete(image.id);
+}
+
+function releasePreviewObjectUrl(image) {
+  if (!image?.previewUrl) return;
+  revokePreviewObjectUrl(image.previewUrl);
+  image.previewUrl = "";
+  image.previewLoading = false;
+  state.previewObjectUrls.delete(image.id);
+}
+
+function releaseAllPreviewObjectUrls() {
+  for (const image of state.images) releasePreviewObjectUrl(image);
+  state.previewObjectUrls.clear();
+}
+
+function prunePreviewObjectUrls() {
+  const keepIds = new Set([
+    ...state.visibleImages.map((image) => image.id),
+    ...state.selected,
+    state.zoomedImageId
+  ].filter(Boolean));
+  for (const image of state.images) {
+    if (keepIds.has(image.id)) continue;
+    releasePreviewObjectUrl(image);
+  }
+}
+
+function revokePreviewObjectUrl(url) {
+  const value = String(url || "").trim();
+  if (!value.startsWith("blob:")) return;
+  URL.revokeObjectURL(value);
+}
+
 function parseCommaList(value = "") {
   return [...new Set(String(value)
     .split(",")
@@ -1136,4 +1269,7 @@ function directionLabel(direction) {
 
 window.addEventListener("unhandledrejection", (event) => setMessage(event.reason?.message || String(event.reason)));
 window.addEventListener("error", (event) => setMessage(event.message));
-window.addEventListener("pagehide", clearPreviewAntiHotlinkRules);
+window.addEventListener("pagehide", () => {
+  clearPreviewAntiHotlinkRules();
+  releaseAllPreviewObjectUrls();
+});

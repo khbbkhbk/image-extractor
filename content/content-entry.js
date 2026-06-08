@@ -2,9 +2,10 @@
   if (window.__CIE_CONTENT_ENTRY_LOADED__) return;
   window.__CIE_CONTENT_ENTRY_LOADED__ = true;
 
-  const [{ ImageScanner }, { PageObserver }] = await Promise.all([
+  const [{ ImageScanner }, { PageObserver }, { putTempBlob }] = await Promise.all([
     import(chrome.runtime.getURL("content/scanner.js")),
-    import(chrome.runtime.getURL("content/observer.js"))
+    import(chrome.runtime.getURL("content/observer.js")),
+    import(chrome.runtime.getURL("download/blob-store.js"))
   ]);
 
   const scanner = new ImageScanner(document);
@@ -104,7 +105,7 @@
       return false;
     }
     if (message.type === "FETCH_IMAGE_BLOB") {
-      fetchImageAsDataUrl(message.url).then(sendResponse).catch((error) => sendResponse({
+      fetchImageToTempBlob(message.url).then(sendResponse).catch((error) => sendResponse({
         ok: false,
         error: error.message,
         status: error.status || 0
@@ -154,7 +155,7 @@
     window.scrollTo({ top: edge === "bottom" ? maxTop : 0, behavior });
   }
 
-  async function fetchImageAsDataUrl(url) {
+  async function fetchImageToTempBlob(url) {
     const response = await fetch(url, {
       credentials: "include",
       cache: "force-cache",
@@ -166,22 +167,14 @@
       throw error;
     }
     const blob = await response.blob();
+    const blobKey = `page-fetch:${Date.now()}:${crypto.randomUUID()}`;
+    await putTempBlob(blobKey, blob);
     return {
       ok: true,
-      dataUrl: await blobToDataUrl(blob),
+      blobKey,
       type: blob.type,
       size: blob.size
     };
-  }
-
-  async function blobToDataUrl(blob) {
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    let binary = "";
-    const chunkSize = 0x8000;
-    for (let index = 0; index < bytes.length; index += chunkSize) {
-      binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
-    }
-    return `data:${blob.type || "application/octet-stream"};base64,${btoa(binary)}`;
   }
 
   function scrollByStep(direction) {

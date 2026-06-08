@@ -1,8 +1,13 @@
 const DB_NAME = "cie-download-cache";
 const STORE_NAME = "temp-download-blobs";
 const DB_VERSION = 1;
+const MAX_TEMP_BLOB_AGE_MS = 10 * 60 * 1000;
+const MAX_TEMP_BLOB_COUNT = 160;
+const CLEANUP_INTERVAL_MS = 60 * 1000;
 
 let openDbPromise = null;
+let cleanupPromise = null;
+let lastCleanupAt = 0;
 
 function openDatabase() {
   if (openDbPromise) return openDbPromise;
@@ -40,6 +45,7 @@ export async function putTempBlob(key, blob) {
     request.onerror = () => reject(request.error || new Error("写入临时下载内容失败"));
     request.onsuccess = () => resolve();
   });
+  scheduleTempBlobCleanup().catch(() => { });
 }
 
 export async function getTempBlob(key) {
@@ -64,4 +70,49 @@ export async function takeTempBlob(key) {
   const blob = await getTempBlob(key);
   await deleteTempBlob(key);
   return blob;
+}
+
+export async function cleanupTempBlobs({ force = false } = {}) {
+  if (!force && Date.now() - lastCleanupAt < CLEANUP_INTERVAL_MS) return;
+  if (cleanupPromise) return cleanupPromise;
+  cleanupPromise = withStore("readwrite", (store, resolve, reject) => {
+    const entries = [];
+    const request = store.openCursor();
+    request.onerror = () => reject(request.error || new Error("清理临时下载内容失败"));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        const now = Date.now();
+        const freshEntries = [];
+        const deleteKeys = [];
+        for (const entry of entries) {
+          const createdAt = Number(entry.createdAt || 0);
+          if (!createdAt || now - createdAt > MAX_TEMP_BLOB_AGE_MS) deleteKeys.push(entry.key);
+          else freshEntries.push(entry);
+        }
+        if (freshEntries.length > MAX_TEMP_BLOB_COUNT) {
+          freshEntries
+            .sort((left, right) => Number(left.createdAt || 0) - Number(right.createdAt || 0))
+            .slice(0, freshEntries.length - MAX_TEMP_BLOB_COUNT)
+            .forEach((entry) => deleteKeys.push(entry.key));
+        }
+        for (const key of new Set(deleteKeys)) store.delete(key);
+        resolve();
+        return;
+      }
+      entries.push({
+        key: cursor.primaryKey,
+        createdAt: cursor.value?.createdAt || 0
+      });
+      cursor.continue();
+    };
+  }).finally(() => {
+    lastCleanupAt = Date.now();
+    cleanupPromise = null;
+  });
+  return cleanupPromise;
+}
+
+async function scheduleTempBlobCleanup() {
+  return cleanupTempBlobs({ force: false });
 }

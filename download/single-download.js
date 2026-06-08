@@ -1,5 +1,6 @@
 import { TaskQueue } from "../core/task-queue.js";
 import { buildFilename, buildMetadata, buildMetadataFilename, buildSourceFilename } from "./filename-builder.js";
+import { takeTempBlob } from "./blob-store.js";
 import { fetchWithRetry } from "./retry-manager.js";
 import { createOffscreenDownloadUrl, createOffscreenDownloadUrlFromRemote, revokeOffscreenDownloadUrl } from "./offscreen-download.js";
 import { convertImageBlob } from "../preview/image-meta.js";
@@ -221,7 +222,11 @@ export async function fetchImageBlob(url, config) {
   if (config.tabId) {
     try {
       const response = await chrome.tabs.sendMessage(config.tabId, { type: "FETCH_IMAGE_BLOB", url });
-      if (response?.ok && response.dataUrl) return await (await fetch(response.dataUrl)).blob();
+      if (response?.ok && response.blobKey) {
+        const blob = await takeTempBlob(response.blobKey);
+        if (blob) return blob;
+        throw new Error("页面上下文已抓取图片，但临时下载内容读取失败。请重试。");
+      }
       if (response?.status) throw createStatusError(response.status, response.error);
       if (response?.error) throw new Error(response.error);
     } catch (error) {
@@ -303,10 +308,7 @@ function createTransferImage(image) {
     naturalWidth: Number(image.naturalWidth || 0) || 0,
     naturalHeight: Number(image.naturalHeight || 0) || 0,
     bytes: Number(image.bytes || 0) || 0,
-    alt: image.alt || "",
     title: image.title || "",
-    source: image.source || "",
-    node: image.node || "",
     hash: image.hash || "",
     site: image.site || ""
   };
@@ -486,7 +488,7 @@ function registerDownloadId(sessionId, downloadId, temporaryBlobUrl = "", meta =
   const session = downloadSessions.get(sessionId);
   if (!session) return;
   session.downloadIds.add(downloadId);
-  if (meta) session.downloadMeta.set(downloadId, meta);
+  if (meta) session.downloadMeta.set(downloadId, sanitizeDownloadMeta(meta));
   sendSessionStatus(sessionId);
 }
 
@@ -644,6 +646,23 @@ function summarizeSessionFailures(session) {
     ...(session?.preSubmitFailures || []),
     ...(session?.runtimeFailures || [])
   ]);
+}
+
+function sanitizeDownloadMeta(meta) {
+  if (!meta || typeof meta !== "object") return meta;
+  if (meta.kind === "image") {
+    return {
+      ...meta,
+      image: createTransferImage(meta.image)
+    };
+  }
+  if (meta.kind === "archive") {
+    return {
+      ...meta,
+      images: Array.isArray(meta.images) ? meta.images.map(createTransferImage).filter(Boolean) : []
+    };
+  }
+  return meta;
 }
 
 function createInterruptedFailure(meta, interruptReason = "") {

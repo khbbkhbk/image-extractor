@@ -1,10 +1,14 @@
 import { TaskQueue } from "../core/task-queue.js";
+import { putTempBlob } from "../download/blob-store.js";
 import { fetchWithRetry } from "../download/retry-manager.js";
 import { antiHotlinkManager } from "./anti-hotlink.js";
 
 export class PreviewManager {
   async fetchPreviews({ images = [], context = {}, config = {}, limit = 24 } = {}) {
-    const selected = images.slice(0, limit);
+    const selected = images
+      .slice(0, limit)
+      .map(normalizePreviewImage)
+      .filter((image) => image?.id && image?.url);
     const queue = new TaskQueue({ concurrency: 4 });
     const results = [];
 
@@ -16,13 +20,14 @@ export class PreviewManager {
             timeoutMs: 15000
           });
           const blob = await response.blob();
-          const preview = await createPreviewDataUrl(blob, image.url);
+          const previewBlob = await createPreviewBlob(blob);
+          const blobKey = `preview:${Date.now()}:${crypto.randomUUID()}`;
+          await putTempBlob(blobKey, previewBlob);
           results.push({
             id: image.id,
             ok: true,
-            previewUrl: preview.dataUrl,
-            bytes: blob.size,
-            type: preview.type
+            blobKey,
+            bytes: blob.size
           });
         } catch (error) {
           results.push({
@@ -39,18 +44,52 @@ export class PreviewManager {
   }
 }
 
-async function createPreviewDataUrl(blob, url) {
-  return { dataUrl: await blobToDataUrl(blob), type: blob.type || "" };
+function normalizePreviewImage(image) {
+  if (!image) return null;
+  return {
+    id: image.id || "",
+    url: String(image.url || "").trim()
+  };
 }
 
-async function blobToDataUrl(blob) {
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+async function createPreviewBlob(blob) {
+  const resized = await resizePreviewBlob(blob).catch(() => null);
+  return resized || blob;
+}
+
+async function resizePreviewBlob(blob) {
+  if (!blob || !/^image\//i.test(blob.type || "")) return null;
+  if (typeof createImageBitmap !== "function" || typeof OffscreenCanvas !== "function") return null;
+  const bitmap = await createImageBitmap(blob);
+  try {
+    const longestEdge = Math.max(bitmap.width || 0, bitmap.height || 0);
+    if (!longestEdge) return null;
+    const maxEdge = 960;
+    const scale = Math.min(1, maxEdge / longestEdge);
+    if (scale >= 1 && blob.size <= 360 * 1024) return null;
+    const width = Math.max(1, Math.round((bitmap.width || 1) * scale));
+    const height = Math.max(1, Math.round((bitmap.height || 1) * scale));
+    const canvas = new OffscreenCanvas(width, height);
+    const context = canvas.getContext("2d", { alpha: true, desynchronized: true });
+    if (!context) return null;
+    context.drawImage(bitmap, 0, 0, width, height);
+    const type = pickPreviewBlobType(blob.type || "");
+    const resizedBlob = await canvas.convertToBlob({
+      type,
+      quality: type === "image/png" ? undefined : 0.82
+    });
+    return resizedBlob.size < blob.size ? resizedBlob : null;
+  } finally {
+    bitmap.close?.();
   }
-  return `data:${blob.type || "application/octet-stream"};base64,${btoa(binary)}`;
+}
+
+function pickPreviewBlobType(type) {
+  const normalizedType = String(type || "").toLowerCase();
+  if (normalizedType === "image/png") return "image/png";
+  if (normalizedType === "image/webp") return "image/webp";
+  if (normalizedType === "image/jpeg" || normalizedType === "image/jpg") return "image/jpeg";
+  return "image/webp";
 }
 
 export const previewManager = new PreviewManager();
