@@ -5,6 +5,7 @@ import { antiHotlinkManager } from "./anti-hotlink.js";
 import { displayModeManager } from "./display-mode.js";
 import { previewManager } from "./preview-manager.js";
 import { abortDownloadSession } from "../download/single-download.js";
+import { estimateStorageUsage, getCapturedImage, putCapturedImage } from "../download/blob-store.js";
 
 displayModeManager.applyFromConfig().catch(console.error);
 
@@ -56,6 +57,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "INSTALL_PREVIEW_ANTI_HOTLINK") {
     antiHotlinkManager.installPreviewRules(message.payload?.images || [], message.payload?.context || {}, message.payload?.config || {})
       .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "STORE_CAPTURED_IMAGE") {
+    storeCapturedImage(message)
+      .then((result) => sendResponse(result))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
@@ -117,3 +125,47 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   return false;
 });
+
+let lastCaptureCacheWarningAt = 0;
+
+// 内容脚本在扫描阶段把 blob 图片原始字节送来做持久化，避免页面内存淘汰后无法下载
+async function storeCapturedImage({ url, dataUrl } = {}) {
+  if (!url || !dataUrl) return { ok: false, error: "参数不完整" };
+  if (await getCapturedImage(url).catch(() => null)) return { ok: true, skipped: true };
+  const response = await fetch(dataUrl);
+  const blob = await response.blob();
+  try {
+    await putCapturedImage(url, blob);
+  } catch (error) {
+    if (error?.name === "CaptureCacheFullError") {
+      notifyCaptureCacheFull("图片缓存空间不足，请先下载已扫描的图片，再继续浏览。");
+      return { ok: false, full: true, error: error.message };
+    }
+    throw error;
+  }
+  await warnCaptureCacheIfNeeded();
+  return { ok: true, bytes: blob.size };
+}
+
+const CAPTURE_SOFT_LIMIT_BYTES = 2 * 1024 * 1024 * 1024;
+
+async function warnCaptureCacheIfNeeded() {
+  const now = Date.now();
+  if (now - lastCaptureCacheWarningAt < 5 * 60 * 1000) return;
+  const { usage, quota } = await estimateStorageUsage();
+  if (!usage) return;
+  const ratio = quota ? usage / quota : 0;
+  // 不做硬性上限，但占用超过 2GB 或接近浏览器配额时提醒用户先下载
+  if (usage < CAPTURE_SOFT_LIMIT_BYTES && ratio < 0.8) return;
+  lastCaptureCacheWarningAt = now;
+  chrome.runtime.sendMessage({
+    type: "CAPTURE_CACHE_WARNING",
+    ratio,
+    usage,
+    quota
+  }).catch(() => { });
+}
+
+function notifyCaptureCacheFull(text) {
+  chrome.runtime.sendMessage({ type: "CAPTURE_CACHE_FULL", text }).catch(() => { });
+}

@@ -2,13 +2,16 @@
   if (window.__CIE_CONTENT_ENTRY_LOADED__) return;
   window.__CIE_CONTENT_ENTRY_LOADED__ = true;
 
-  const [{ ImageScanner }, { PageObserver }, { putTempBlob }] = await Promise.all([
+  const [{ ImageScanner }, { PageObserver }] = await Promise.all([
     import(chrome.runtime.getURL("content/scanner.js")),
-    import(chrome.runtime.getURL("content/observer.js")),
-    import(chrome.runtime.getURL("download/blob-store.js"))
+    import(chrome.runtime.getURL("content/observer.js"))
   ]);
 
   const scanner = new ImageScanner(document);
+  const CAPTURED_IMAGE_LIMIT = 120;
+  const capturedImageBlobs = new Map();
+  const capturingImageUrls = new Set();
+  const persistedImageUrls = new Set();
   let observer = null;
   let lastPayload = null;
   let active = true;
@@ -19,6 +22,8 @@
     try {
       lastPayload = await scanner.scan();
       safeSendMessage({ type: "IMAGES_UPDATED", reason, payload: lastPayload });
+      // 虚拟化阅读器随时会卸载图片，扫描后立即缓存像素，供后续下载与预览使用
+      captureScannedImages(lastPayload.images).catch(() => { });
       return lastPayload;
     } catch (error) {
       if (isContextInvalidated(error)) {
@@ -105,10 +110,17 @@
       return false;
     }
     if (message.type === "FETCH_IMAGE_BLOB") {
-      fetchImageToTempBlob(message.url).then(sendResponse).catch((error) => sendResponse({
+      fetchImageToDataUrl(message.url).then(sendResponse).catch((error) => sendResponse({
         ok: false,
         error: error.message,
         status: error.status || 0
+      }));
+      return true;
+    }
+    if (message.type === "CAPTURE_RENDERED_IMAGE") {
+      captureRenderedImageToDataUrl(message.url, message.options).then(sendResponse).catch((error) => sendResponse({
+        ok: false,
+        error: error.message
       }));
       return true;
     }
@@ -155,11 +167,164 @@
     window.scrollTo({ top: edge === "bottom" ? maxTop : 0, behavior });
   }
 
-  async function fetchImageToTempBlob(url) {
-    const response = await fetch(url, {
-      credentials: "include",
-      cache: "force-cache",
-      mode: "cors"
+  // 扫描阶段缓存 blob 图片：优先取页面原始 Blob，取不到再截取已解码像素
+  async function captureScannedImages(images = []) {
+    const pendingUrls = images
+      .map((image) => String(image?.url || ""))
+      .filter((url) => url.startsWith("blob:"))
+      .filter((url) => !capturedImageBlobs.has(url) && !capturingImageUrls.has(url));
+    await Promise.all(pendingUrls.map((url) => captureScannedImage(url)));
+  }
+
+  async function captureScannedImage(url) {
+    capturingImageUrls.add(url);
+    try {
+      const originalBlob = await requestOriginalImageBlob(url);
+      if (originalBlob) {
+        rememberCapturedImage(url, originalBlob);
+        persistCapturedImage(url, originalBlob);
+        return;
+      }
+      const target = findRenderedImage(url);
+      if (!target) return;
+      const blob = await renderImageBlob(target, { type: "image/webp", quality: 0.95 });
+      if (blob) {
+        rememberCapturedImage(url, blob);
+        persistCapturedImage(url, blob);
+      }
+    } finally {
+      capturingImageUrls.delete(url);
+    }
+  }
+
+  // 原始字节同时落盘到扩展 IndexedDB，页面内存淘汰或刷新后仍能下载
+  function persistCapturedImage(url, blob) {
+    if (!url || persistedImageUrls.has(url)) return;
+    persistedImageUrls.add(url);
+    blobToDataUrl(blob)
+      .then((dataUrl) => chrome.runtime.sendMessage({ type: "STORE_CAPTURED_IMAGE", url, dataUrl }))
+      .then((response) => {
+        // 后台空间不足时不再重试；其他失败允许后续扫描再次尝试
+        if (response?.ok || response?.full) return;
+        persistedImageUrls.delete(url);
+      })
+      .catch(() => persistedImageUrls.delete(url));
+  }
+
+  // 主世界脚本持有站点创建的原始 Blob，跨世界通过 postMessage 请求
+  function requestOriginalImageBlob(url) {
+    return new Promise((resolve) => {
+      const id = `cie-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const timer = setTimeout(() => finish(""), 800);
+      const onMessage = (event) => {
+        const data = event.data;
+        if (!data || data.__cieBlobResponse !== true || data.id !== id) return;
+        finish(data.ok && data.dataUrl ? data.dataUrl : "");
+      };
+      function finish(dataUrl) {
+        clearTimeout(timer);
+        window.removeEventListener("message", onMessage);
+        if (!dataUrl) {
+          resolve(null);
+          return;
+        }
+        fetch(dataUrl)
+          .then((response) => response.blob())
+          .then((blob) => resolve(blob.type.startsWith("image/") ? blob : null))
+          .catch(() => resolve(null));
+      }
+      window.addEventListener("message", onMessage);
+      window.postMessage({ __cieBlobRequest: true, id, url }, "*");
+    });
+  }
+
+  function findRenderedImage(url) {
+    return [...document.images].find((image) => (image.currentSrc || image.src) === url && image.naturalWidth > 0);
+  }
+
+  function rememberCapturedImage(url, blob) {
+    capturedImageBlobs.set(url, blob);
+    while (capturedImageBlobs.size > CAPTURED_IMAGE_LIMIT) {
+      const oldestUrl = capturedImageBlobs.keys().next().value;
+      capturedImageBlobs.delete(oldestUrl);
+    }
+  }
+
+  async function renderImageBlob(element, options = {}) {
+    const width = Number(element?.naturalWidth || 0);
+    const height = Number(element?.naturalHeight || 0);
+    if (!width || !height) return null;
+    const maxEdge = Number(options.maxEdge || 0);
+    const scale = maxEdge > 0 ? Math.min(1, maxEdge / Math.max(width, height)) : 1;
+    const outWidth = Math.max(1, Math.round(width * scale));
+    const outHeight = Math.max(1, Math.round(height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = outWidth;
+    canvas.height = outHeight;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.drawImage(element, 0, 0, outWidth, outHeight);
+    try {
+      return await new Promise((resolve) => canvas.toBlob(
+        resolve,
+        options.type || "image/png",
+        options.quality
+      ));
+    } catch {
+      return null;
+    }
+  }
+
+  // 已缓存的图片按需缩放，避免预览时回传整张大图
+  async function cachedImageToDataUrl(blob, options = {}) {
+    const maxEdge = Number(options.maxEdge || 0);
+    if (maxEdge > 0) {
+      try {
+        const bitmap = await createImageBitmap(blob);
+        try {
+          const scale = Math.min(1, maxEdge / Math.max(bitmap.width || 1, bitmap.height || 1));
+          const width = Math.max(1, Math.round((bitmap.width || 1) * scale));
+          const height = Math.max(1, Math.round((bitmap.height || 1) * scale));
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const context = canvas.getContext("2d");
+          if (context) {
+            context.drawImage(bitmap, 0, 0, width, height);
+            const resized = await new Promise((resolve) => canvas.toBlob(
+              resolve,
+              options.type || "image/webp",
+              options.quality
+            ));
+            if (resized) {
+              return { ok: true, dataUrl: await blobToDataUrl(resized), type: resized.type, size: resized.size };
+            }
+          }
+        } finally {
+          bitmap.close?.();
+        }
+      } catch {
+        // 缩放失败时回退原图
+      }
+    }
+    return { ok: true, dataUrl: await blobToDataUrl(blob), type: blob.type, size: blob.size };
+  }
+
+  // 页面内抓取图片：先带凭据请求，遇到返回通配符 ACAO 的 CDN 时去掉凭据重试
+  async function fetchImageToDataUrl(url) {
+    const cached = capturedImageBlobs.get(url);
+    if (cached) return cachedImageToDataUrl(cached);
+    if (url.startsWith("blob:")) {
+      const original = await requestOriginalImageBlob(url);
+      if (original) {
+        rememberCapturedImage(url, original);
+        persistCapturedImage(url, original);
+        return cachedImageToDataUrl(original);
+      }
+    }
+    const response = await requestImage(url, "include").catch((error) => {
+      if (error?.name !== "TypeError") throw error;
+      return requestImage(url, "omit");
     });
     if (!response.ok) {
       const error = new Error(`Page fetch failed: HTTP ${response.status}`);
@@ -167,14 +332,57 @@
       throw error;
     }
     const blob = await response.blob();
-    const blobKey = `page-fetch:${Date.now()}:${crypto.randomUUID()}`;
-    await putTempBlob(blobKey, blob);
+    if (url.startsWith("blob:")) persistCapturedImage(url, blob);
     return {
       ok: true,
-      blobKey,
+      dataUrl: await blobToDataUrl(blob),
       type: blob.type,
       size: blob.size
     };
+  }
+
+  function requestImage(url, credentials) {
+    return fetch(url, {
+      credentials,
+      cache: "force-cache",
+      mode: "cors",
+      referrer: location.href,
+      referrerPolicy: "unsafe-url"
+    });
+  }
+
+  // 部分站点在图片渲染后立即回收 blob: 地址，优先使用扫描时缓存的像素
+  async function captureRenderedImageToDataUrl(url, options = {}) {
+    const cached = capturedImageBlobs.get(url);
+    if (cached) return cachedImageToDataUrl(cached, options);
+    if (url.startsWith("blob:")) {
+      const original = await requestOriginalImageBlob(url);
+      if (original) {
+        rememberCapturedImage(url, original);
+        persistCapturedImage(url, original);
+        return cachedImageToDataUrl(original, options);
+      }
+    }
+    const target = findRenderedImage(url);
+    if (!target) throw new Error("页面中已找不到该图片元素，请重新扫描页面后重试；若刚更新过扩展，请刷新页面。");
+    const blob = await renderImageBlob(target, options);
+    if (!blob) throw new Error("页面图片截取失败，请重新扫描页面后重试。");
+    if (url.startsWith("blob:")) persistCapturedImage(url, blob);
+    return {
+      ok: true,
+      dataUrl: await blobToDataUrl(blob),
+      type: blob.type,
+      size: blob.size
+    };
+  }
+
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(reader.error || new Error("读取图片内容失败。"));
+      reader.readAsDataURL(blob);
+    });
   }
 
   function scrollByStep(direction) {

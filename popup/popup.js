@@ -201,6 +201,32 @@ chrome.runtime.onMessage.addListener((runtimeMessage, sender) => {
     return;
   }
 
+  if (runtimeMessage?.type === "CAPTURE_CACHE_FULL") {
+    const text = runtimeMessage.text || "图片缓存空间不足，请先下载已扫描的图片。";
+    showToast(text, { durationMs: 6000 });
+    setMessage(text);
+    return;
+  }
+
+  if (runtimeMessage?.type === "CAPTURE_CACHE_PRUNED") {
+    const freedMb = Math.round(Number(runtimeMessage.freedBytes || 0) / 1024 / 1024);
+    const text = `图片缓存空间不足，已回收最旧的约 ${freedMb} MB 缓存；未下载的旧图片可能需要回到页面重新扫描。`;
+    showToast(text, { durationMs: 6000 });
+    setMessage(text);
+    return;
+  }
+
+  if (runtimeMessage?.type === "CAPTURE_CACHE_WARNING") {
+    const percent = Math.round(Number(runtimeMessage.ratio || 0) * 100);
+    const usageMb = Math.round(Number(runtimeMessage.usage || 0) / 1024 / 1024);
+    const text = usageMb > 0
+      ? `图片缓存已占用约 ${usageMb} MB（约配额的 ${percent}%），建议先下载当前章节，避免缓存被回收。`
+      : `图片缓存已占用约配额的 ${percent}%，建议先下载当前章节，避免缓存被回收。`;
+    showToast(text, { durationMs: 6000 });
+    setMessage(text);
+    return;
+  }
+
   if (runtimeMessage?.type === "IMAGES_UPDATED" && sender?.tab?.id === state.activeTabId) {
     schedulePayloadApply(runtimeMessage.payload, sender.tab);
   }
@@ -523,7 +549,7 @@ async function retryAutoFailures() {
   if (!state.autoRetryImages.length) return;
   stopAutoRetry();
   state.autoRetryStopped = false;
-  await startDownload(state.autoRetryImages, `正在重下 ${getAutoRetryLabel()} 图片`).catch((error) => {
+  await startDownload(resolveLatestImages(state.autoRetryImages), `正在重下 ${getAutoRetryLabel()} 图片`).catch((error) => {
     showToast(error.message || String(error));
     setMessage(error.message || String(error));
   });
@@ -532,10 +558,27 @@ async function retryAutoFailures() {
 async function retryManualFailures() {
   if (!state.manualRetryImages.length) return;
   stopAutoRetry({ silent: true });
-  await startDownload(state.manualRetryImages, `正在手动重试 ${getManualRetryLabel()} 图片`).catch((error) => {
+  await startDownload(resolveLatestImages(state.manualRetryImages), `正在手动重试 ${getManualRetryLabel()} 图片`).catch((error) => {
     showToast(error.message || String(error));
     setMessage(error.message || String(error));
   });
+}
+
+// 失败记录保存的是快照，重试时按 id 取回最新对象，才能用上重新渲染后的 blob 地址
+function resolveLatestImages(images = []) {
+  return images
+    .map((image) => state.images.find((item) => item.id === image.id) || image)
+    .filter(Boolean);
+}
+
+// 下载/重试应使用图片所属标签页，避免切到 chrome:// 页面后误判为不支持内容脚本
+async function resolveDownloadTab() {
+  if (state.activeTabId) {
+    const tab = await chrome.tabs.get(state.activeTabId).catch(() => null);
+    if (tab?.id) return tab;
+  }
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab || null;
 }
 
 async function startDownload(images, label, { autoRetry = false } = {}) {
@@ -552,7 +595,7 @@ async function startDownload(images, label, { autoRetry = false } = {}) {
     originalUrl: image.originalUrl,
     editedUrl: image.editedUrl
   })));
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = await resolveDownloadTab();
   if (tab?.id) await ensureContentScript(tab);
   const response = await chrome.runtime.sendMessage({
     type: "DOWNLOAD_IMAGES",
@@ -629,7 +672,6 @@ async function ensureContentScript(tab) {
   }
   try {
     await sendTabMessage(tab.id, { type: "PING" });
-    return;
   } catch {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -637,6 +679,12 @@ async function ensureContentScript(tab) {
     });
     await wait(250);
   }
+  // 扩展更新前已打开的页面不会自动注入主世界钩子，这里补注入以接管后续创建的 blob 图片
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    files: ["content/blob-hook-main.js"],
+    world: "MAIN"
+  }).catch(() => { });
 }
 
 function wait(ms) {
@@ -676,7 +724,7 @@ function scheduleAutoRetryAuto() {
       scheduleAutoRetryAuto();
       return;
     }
-    startDownload(state.autoRetryImages, `自动重试 ${getAutoRetryLabel()} 图片`, { autoRetry: true }).catch((error) => setMessage(error.message));
+    startDownload(resolveLatestImages(state.autoRetryImages), `自动重试 ${getAutoRetryLabel()} 图片`, { autoRetry: true }).catch((error) => setMessage(error.message));
   }, 1000);
 }
 
@@ -768,6 +816,9 @@ function buildFinishedFailureSummaryText() {
 }
 
 function getStableKey(image) {
+  // blob 图片的内容指纹优先于易变的 blob 地址，用于增量合并时识别重渲染的同一张图
+  const dedupeKey = String(image?.dedupeKey || "");
+  if (dedupeKey.startsWith("content:")) return dedupeKey;
   const raw = String(image?.url || image?.originalUrl || "").trim();
   if (!raw) return null;
   if (raw.startsWith("data:") || raw.startsWith("blob:")) return raw;
@@ -784,6 +835,13 @@ function getStableKey(image) {
 
 function mergeIncomingIntoExisting(existing, incoming) {
   if (!existing || !incoming) return;
+  // blob 图片每次重渲染都会换地址，按内容合并时需要同步为最新地址，下载才能命中缓存
+  if (String(existing.dedupeKey || "").startsWith("content:") && incoming.url) {
+    const urlWasEdited = Boolean(existing.editedUrl) && existing.editedUrl !== existing.url;
+    existing.url = incoming.url;
+    existing.originalUrl = incoming.originalUrl || incoming.url;
+    if (!urlWasEdited) existing.editedUrl = incoming.url;
+  }
   if (!existing.width && incoming.width) existing.width = incoming.width;
   if (!existing.height && incoming.height) existing.height = incoming.height;
   if (!existing.naturalWidth && incoming.naturalWidth) existing.naturalWidth = incoming.naturalWidth;
@@ -836,7 +894,8 @@ async function hydrateVisiblePreviews() {
           images: candidates.map(createPreviewRequestImage),
           context: createPreviewRequestContext(state.context),
           config: createPreviewRequestConfig(state.config.download),
-          limit: candidates.length
+          limit: candidates.length,
+          tabId: state.activeTabId
         }
       }).catch((error) => ({ ok: false, error: error.message }));
 

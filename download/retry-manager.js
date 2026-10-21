@@ -25,7 +25,12 @@ export async function withRetry(task, { retries = 2, timeoutMs = 25000, onRetry 
 
 export async function fetchWithRetry(url, options = {}) {
   return withRetry(async () => {
-    const response = await fetch(url, { credentials: "include", cache: "force-cache" });
+    const requestOptions = { credentials: "include", cache: "force-cache" };
+    if (options.referrer) {
+      requestOptions.referrer = options.referrer;
+      requestOptions.referrerPolicy = "unsafe-url";
+    }
+    const response = await fetch(url, requestOptions);
     if (!response.ok) throw new HttpStatusError(response);
     return response;
   }, options);

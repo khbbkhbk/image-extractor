@@ -1,10 +1,10 @@
 import { TaskQueue } from "../core/task-queue.js";
-import { putTempBlob } from "../download/blob-store.js";
+import { getCapturedImage, putTempBlob } from "../download/blob-store.js";
 import { fetchWithRetry } from "../download/retry-manager.js";
 import { antiHotlinkManager } from "./anti-hotlink.js";
 
 export class PreviewManager {
-  async fetchPreviews({ images = [], context = {}, config = {}, limit = 24 } = {}) {
+  async fetchPreviews({ images = [], context = {}, config = {}, limit = 24, tabId = 0 } = {}) {
     const selected = images
       .slice(0, limit)
       .map(normalizePreviewImage)
@@ -15,11 +15,7 @@ export class PreviewManager {
     await antiHotlinkManager.withRules(selected, context, config, async () => {
       await Promise.all(selected.map((image) => queue.add(async () => {
         try {
-          const response = image.url.startsWith("data:") ? await fetch(image.url) : await fetchWithRetry(image.url, {
-            retries: 1,
-            timeoutMs: 15000
-          });
-          const blob = await response.blob();
+          const blob = await loadPreviewSource(image.url, tabId);
           const previewBlob = await createPreviewBlob(blob);
           const blobKey = `preview:${Date.now()}:${crypto.randomUUID()}`;
           await putTempBlob(blobKey, previewBlob);
@@ -42,6 +38,34 @@ export class PreviewManager {
 
     return { results };
   }
+}
+
+async function loadPreviewSource(url, tabId) {
+  if (url.startsWith("blob:")) {
+    const stored = await getCapturedImage(url).catch(() => null);
+    if (stored) return stored;
+    if (!tabId) throw new Error("该图片位于页面上下文中，缺少标签页信息，无法生成预览");
+    return capturePageImagePreview(tabId, url);
+  }
+  const response = url.startsWith("data:") ? await fetch(url) : await fetchWithRetry(url, {
+    retries: 1,
+    timeoutMs: 15000
+  });
+  return response.blob();
+}
+
+// blob: 图片只能在页面内读取，由内容脚本截取已解码的图片并缩成小尺寸预览
+async function capturePageImagePreview(tabId, url) {
+  const response = await chrome.tabs.sendMessage(tabId, {
+    type: "CAPTURE_RENDERED_IMAGE",
+    url,
+    options: { maxEdge: 960, type: "image/webp", quality: 0.82 }
+  });
+  if (!response?.ok || !response.dataUrl) {
+    throw new Error(response?.error || "页面预览截取失败");
+  }
+  const dataResponse = await fetch(response.dataUrl);
+  return dataResponse.blob();
 }
 
 function normalizePreviewImage(image) {

@@ -36,6 +36,8 @@ export function buildSourceFilename(image, index, options = {}) {
 
 export function getSourceFilename(url = "", index = 1, ext = "jpg") {
   const raw = String(url || "");
+  // blob:/data: 地址没有有意义的文件名，回退为页码命名
+  if (/^(blob|data):/i.test(raw)) return `${padNumber(index, 3)}.${ext}`;
   const noHash = raw.split("#")[0];
   const lastSegment = noHash.split("/").filter(Boolean).at(-1) || "";
   const base = lastSegment.split("?")[0] || "";

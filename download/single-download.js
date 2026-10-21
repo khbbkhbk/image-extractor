@@ -1,9 +1,9 @@
 import { TaskQueue } from "../core/task-queue.js";
 import { buildFilename, buildMetadata, buildMetadataFilename, buildSourceFilename } from "./filename-builder.js";
-import { takeTempBlob } from "./blob-store.js";
 import { fetchWithRetry } from "./retry-manager.js";
 import { createOffscreenDownloadUrl, createOffscreenDownloadUrlFromRemote, revokeOffscreenDownloadUrl } from "./offscreen-download.js";
 import { convertImageBlob } from "../preview/image-meta.js";
+import { getCapturedImage, putCapturedImage } from "./blob-store.js";
 
 const downloadSessions = new Map();
 const downloadBlobUrls = new Map();
@@ -208,9 +208,17 @@ export async function fetchImageBlob(url, config) {
   }
 
   const requiresPageContextFetch = url.startsWith("blob:");
+  // blob 图片优先使用扫描阶段落盘的原始字节，页面刷新或内存淘汰后仍可下载
+  if (requiresPageContextFetch) {
+    const stored = await getCapturedImage(url).catch(() => null);
+    if (stored) return stored;
+  }
   if (!requiresPageContextFetch) {
     try {
-      const response = await fetchWithRetry(url, config);
+      const response = await fetchWithRetry(url, {
+        ...config,
+        referrer: config.hotlinkReferer || config.tabUrl || ""
+      });
       return response.blob();
     } catch (error) {
       if (!config.antiHotlink?.enabled || !config.tabId) throw error;
@@ -222,9 +230,12 @@ export async function fetchImageBlob(url, config) {
   if (config.tabId) {
     try {
       const response = await chrome.tabs.sendMessage(config.tabId, { type: "FETCH_IMAGE_BLOB", url });
-      if (response?.ok && response.blobKey) {
-        const blob = await takeTempBlob(response.blobKey);
-        if (blob) return blob;
+      if (response?.ok) {
+        const blob = await takePageImageBlob(response);
+        if (blob) {
+          persistCapturedImage(url, blob);
+          return blob;
+        }
         throw new Error("页面上下文已抓取图片，但临时下载内容读取失败。请重试。");
       }
       if (response?.status) throw createStatusError(response.status, response.error);
@@ -234,11 +245,46 @@ export async function fetchImageBlob(url, config) {
       if (/quota exceeded/i.test(message)) {
         throw new Error("页面上下文取图时触发浏览器配额限制。建议关闭防盗链后重试，或改用 ZIP 模式、减少单次下载数量。");
       }
+      // blob: 地址常被站点在渲染后立即回收，改用页面已解码的图片元素截取
+      if (requiresPageContextFetch) {
+        const captured = await captureRenderedImage(url, config);
+        if (captured) {
+          persistCapturedImage(url, captured);
+          return captured;
+        }
+        throw new Error(`页面上下文读取图片失败（${message}），且无法从页面截取该图片。若刚更新过扩展，请刷新页面后重新扫描再试。`);
+      }
       throw error;
     }
   }
 
   throw new Error("当前图片需要页面上下文取图，但未获取到可用标签页上下文。");
+}
+
+function persistCapturedImage(url, blob) {
+  if (!url.startsWith("blob:") || !(blob instanceof Blob)) return;
+  putCapturedImage(url, blob).catch(() => { });
+}
+
+async function takePageImageBlob(response) {
+  // 内容脚本与扩展分属不同存储源，图片内容统一通过 data URL 回传
+  if (!response?.dataUrl) return null;
+  const dataResponse = await fetch(response.dataUrl);
+  return dataResponse.blob();
+}
+
+async function captureRenderedImage(url, config) {
+  try {
+    const response = await chrome.tabs.sendMessage(config.tabId, { type: "CAPTURE_RENDERED_IMAGE", url });
+    if (!response?.ok) {
+      if (response?.error) console.warn("[CIE:download] 页面图片截取失败：", response.error);
+      return null;
+    }
+    return await takePageImageBlob(response);
+  } catch (error) {
+    console.warn("[CIE:download] 页面图片截取失败。", error);
+    return null;
+  }
 }
 
 export function logDownloadFailure(stage, error, extra = {}) {
